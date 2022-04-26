@@ -59,10 +59,10 @@ class LaneATT(nn.Module):
 
         # Setup and initialize layers
         self.conv1 = nn.Conv2d(backbone_nb_channels, self.anchor_feat_channels, kernel_size=1)
-        self.cls_layer = nn.Linear(2 * self.anchor_feat_channels * self.fmap_h, 2)
-        self.reg_layer = nn.Linear(2 * self.anchor_feat_channels * self.fmap_h, self.n_offsets + 1)
-        self.attention_layer = nn.Linear(self.anchor_feat_channels * self.fmap_h, len(self.anchors) - 1)
-        self.initialize_layer(self.attention_layer)
+        self.cls_layer = nn.Linear(self.anchor_feat_channels * self.fmap_h, 2)
+        self.reg_layer = nn.Linear(self.anchor_feat_channels * self.fmap_h, self.n_offsets + 1)
+        # self.attention_layer = nn.Linear(self.anchor_feat_channels * self.fmap_h, len(self.anchors) - 1)
+        # self.initialize_layer(self.attention_layer)
         self.initialize_layer(self.conv1)
         self.initialize_layer(self.cls_layer)
         self.initialize_layer(self.reg_layer)
@@ -76,19 +76,20 @@ class LaneATT(nn.Module):
         batch_anchor_features = batch_anchor_features.view(-1, self.anchor_feat_channels * self.fmap_h)
 
         # Add attention features
-        softmax = nn.Softmax(dim=1)
-        scores = self.attention_layer(batch_anchor_features)
-        attention = softmax(scores).reshape(x.shape[0], len(self.anchors), -1)
-        attention_matrix = torch.eye(attention.shape[1], device=x.device).repeat(x.shape[0], 1, 1)
-        non_diag_inds = torch.nonzero(attention_matrix == 0., as_tuple=False)
-        attention_matrix[:] = 0
-        attention_matrix[non_diag_inds[:, 0], non_diag_inds[:, 1], non_diag_inds[:, 2]] = attention.flatten()
-        batch_anchor_features = batch_anchor_features.reshape(x.shape[0], len(self.anchors), -1)
-        attention_features = torch.bmm(torch.transpose(batch_anchor_features, 1, 2),
-                                       torch.transpose(attention_matrix, 1, 2)).transpose(1, 2)
-        attention_features = attention_features.reshape(-1, self.anchor_feat_channels * self.fmap_h)
-        batch_anchor_features = batch_anchor_features.reshape(-1, self.anchor_feat_channels * self.fmap_h)
-        batch_anchor_features = torch.cat((attention_features, batch_anchor_features), dim=1)
+
+        # softmax = nn.Softmax(dim=1)
+        # scores = self.attention_layer(batch_anchor_features)
+        # attention = softmax(scores).reshape(x.shape[0], len(self.anchors), -1)
+        # attention_matrix = torch.eye(attention.shape[1], device=x.device).repeat(x.shape[0], 1, 1)
+        # non_diag_inds = torch.nonzero(attention_matrix == 0., as_tuple=False)
+        # attention_matrix[:] = 0
+        # attention_matrix[non_diag_inds[:, 0], non_diag_inds[:, 1], non_diag_inds[:, 2]] = attention.flatten()
+        # batch_anchor_features = batch_anchor_features.reshape(x.shape[0], len(self.anchors), -1)
+        # attention_features = torch.bmm(torch.transpose(batch_anchor_features, 1, 2),
+        #                                torch.transpose(attention_matrix, 1, 2)).transpose(1, 2)
+        # attention_features = attention_features.reshape(-1, self.anchor_feat_channels * self.fmap_h)
+        # batch_anchor_features = batch_anchor_features.reshape(-1, self.anchor_feat_channels * self.fmap_h)
+        # batch_anchor_features = torch.cat((attention_features, batch_anchor_features), dim=1)
 
         # Predict
         cls_logits = self.cls_layer(batch_anchor_features)
@@ -105,7 +106,7 @@ class LaneATT(nn.Module):
         reg_proposals[:, :, 4:] += reg
 
         # Apply nms
-        proposals_list = self.nms(reg_proposals, attention_matrix, nms_thres, nms_topk, conf_threshold)
+        proposals_list = self.nms(reg_proposals, reg_proposals, nms_thres, nms_topk, conf_threshold)
 
         return proposals_list
 
