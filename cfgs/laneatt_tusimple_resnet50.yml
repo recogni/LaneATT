@@ -11,7 +11,7 @@ model:
     anchors_freq_path: 'data/tusimple_anchors_freq.pt'
     img_h: &img_h 360
     img_w: &img_w 640
-    anchor_feat_channels: 512
+    anchor_feat_channels: 2048
 batch_size: 8
 epochs: 100
 loss_parameters: {}
