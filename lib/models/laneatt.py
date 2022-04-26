@@ -221,6 +221,10 @@ class LaneATT(nn.Module):
         cut_ys = cut_ys.reshape(-1, 1)
         cut_zs = torch.arange(n_fmaps).repeat_interleave(fmaps_h).repeat(n_proposals)[:, None]
 
+        cut_ys_reshaped = torch.reshape(cut_ys, invalid_mask.shape)
+        not_side_mask = ~((cut_ys_reshaped == fmaps_h - 1) | (unclamped_xs == 0) | (unclamped_xs == fmaps_w - 1))
+        invalid_mask |= not_side_mask
+
         return cut_zs, cut_ys, cut_xs, invalid_mask
 
     def cut_anchor_features(self, features):
