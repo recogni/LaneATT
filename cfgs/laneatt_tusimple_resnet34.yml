@@ -1,6 +1,6 @@
 # Model settings
 val_every: 10
-model_checkpoint_interval: 1
+model_checkpoint_interval: 10
 seed: 0
 model:
   name: LaneATT
