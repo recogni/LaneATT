@@ -17,7 +17,7 @@ loss_parameters: {}
 train_parameters:
   conf_threshold:
   nms_thres: 15.
-  nms_topk: 3000
+  nms_topk: 6000
 test_parameters:
   conf_threshold: 0.2
   nms_thres: 45.

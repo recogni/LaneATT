@@ -12,6 +12,7 @@ from lib.focal_loss import FocalLoss
 
 from .resnet import resnet122 as resnet122_cifar
 from .matching import match_proposals_with_targets
+import matplotlib.pyplot as plt
 
 
 class LaneATT(nn.Module):
@@ -37,24 +38,38 @@ class LaneATT(nn.Module):
 
         # Anchor angles, same ones used in Line-CNN
         self.anchor_angles = [15., 22., 30., 39., 49., 60., 72, 80., 90., 100, 108., 120., 131., 141., 150., 158., 165.]
-        self.n_anchors = len(self.anchor_angles) # 17
+        self.n_anchors_per_pos = len(self.anchor_angles) # 17
 
-        # Generate anchors
-        self.anchors = self.generate_anchors(self.n_offsets, self.anchor_angles, self.fmap_h, self.fmap_w)
+        # Generate anchors Anchor vec = [p(pos), p(neg), x_o, y_o, L, d1, ..., dS]
+        self.n_pred_per_anchor = 2 + 2 + 1 + self.n_offsets
+        self.anchors = self.generate_anchors(self.anchor_angles, self.fmap_h, self.fmap_w) # (N_pred_per_anchor*N_angles)xHfxWf
+        
+        # Now keep another anchor tensor that holds only the stacked anchors from the sides and bottom
+        # (A*(2+2+S+1))x(2*Hf+Wf)
+        self.anchors_anchor_dim_0 = torch.zeros((self.n_pred_per_anchor*self.n_anchors_per_pos, self.fmap_w + 2*self.fmap_h))
+        self.anchors_anchor_dim_0[:, :self.fmap_h] = self.anchors[:, :, 0] # left image border
+        self.anchors_anchor_dim_0[:, self.fmap_h: 2 * self.fmap_h] = self.anchors[:, : , -1] # right image border
+        self.anchors_anchor_dim_0[:, 2 * self.fmap_h: 2 * self.fmap_h + self.fmap_w] = self.anchors[: , -1, :] # bottom row
+
+        # A*N_pred*Hf*Wf -> A*(2*Hf+Wf)xN_pred
+        self.anchors_anchor_dim = torch.zeros((self.n_anchors_per_pos*(self.fmap_w + 2*self.fmap_h), self.n_pred_per_anchor))
+        for pos_ix in range((self.fmap_w + 2*self.fmap_h)):
+            for a_ix in range(self.n_anchors_per_pos):
+                self.anchors_anchor_dim[a_ix*(pos_ix+1), :] = self.anchors_anchor_dim_0[a_ix*self.n_pred_per_anchor:(a_ix+1)*self.n_pred_per_anchor, pos_ix]
 
         # Setup and initialize layers
         conv_out_channels = 1024
         self.conv = nn.Conv2d(in_channels=backbone_nb_channels, out_channels=conv_out_channels, kernel_size=1)
-        self.conv_cls = nn.Conv2d(in_channels=conv_out_channels, out_channels=2*self.n_anchors, kernel_size=1)
-        self.conv_reg = nn.Conv2d(in_channels=conv_out_channels, out_channels=2*(self.n_offsets+1), kernel_size=1)
+        self.conv_cls = nn.Conv2d(in_channels=conv_out_channels, out_channels=2*self.n_anchors_per_pos, kernel_size=1)
+        self.conv_reg = nn.Conv2d(in_channels=conv_out_channels, out_channels=self.n_anchors_per_pos*(self.n_offsets+1), kernel_size=1)
 
         self.initialize_layer(self.conv)
         self.initialize_layer(self.conv_cls)
         self.initialize_layer(self.conv_reg)
 
 
-    def generate_anchors(self, n_offsets, angles, fmap_h, fmap_w):
-        n_pred = (n_offsets + 1) * len(angles)
+    def generate_anchors(self, angles, fmap_h, fmap_w):
+        n_pred = self.n_pred_per_anchor * self.n_anchors_per_pos
         anchors = torch.zeros((n_pred, fmap_h, fmap_w))
 
         left_anchors = self.generate_side_anchors(angles, x=0., n_origins=fmap_h)
@@ -74,11 +89,9 @@ class LaneATT(nn.Module):
         else:
             raise Exception('Please define exactly one of `x` or `y` (not neither nor both)')
 
-        n_angles = len(angles)
-
         # each row, first for x and second for y:
         # 2 scores, 1 start_y, start_x, 1 lenght, S coordinates, score[0] = negative prob, score[1] = positive prob
-        anchors = torch.zeros((n_angles * (self.n_offsets + 1), n_origins))
+        anchors = torch.zeros((self.n_pred_per_anchor * self.n_anchors_per_pos, n_origins))
         for i, origin in enumerate(origins):
             anchors_at_origin = torch.empty((0))
             for angle in angles:
@@ -90,50 +103,46 @@ class LaneATT(nn.Module):
 
     def generate_anchor(self, start, angle):
         anchor_ys = self.anchor_ys
-        anchor = torch.zeros(self.n_offsets + 1)
+        anchor = torch.zeros(self.n_pred_per_anchor)
         angle = angle * math.pi / 180.  # degrees to radians
         start_x, start_y = start
-        # anchor zero is the length prediction
-        anchor[1:] = (start_x + (1 - anchor_ys - 1 + start_y) / math.tan(angle)) * self.img_w
+        # anchor[:2] are the probabilities of positive/negative anchor
+        anchor[2] = 1 - start_y
+        anchor[3] = start_x
+        # anchor[4] is the length
+        anchor[5:] = (start_x + (1 - anchor_ys - 1 + start_y) / math.tan(angle)) * self.img_w
         return anchor
 
-    def forward(self, x, conf_threshold=None, nms_thresh=0, nms_topk=3000):
+    def forward(self, x, conf_threshold=None, nms_thres=0, nms_topk=6000):
         resnet_features = self.feature_extractor(x) # BxCrxHfxWf
         features = self.conv(resnet_features) # BxCfxHfxWf
 
         cls_features = self.conv_cls(features) # Bx2*AxHfxWf
         reg_features = self.conv_reg(features) # BxA*(S+1)xHfxWf
 
-        # Add anchors
+        # fill the lane feature tensor. This is still the same shape as the feature map 
+        # BxA*(2+2+S+1)xHfxWf
+        batch_size = cls_features.shape[0]
+        lane_features = torch.zeros((batch_size, self.n_pred_per_anchor*self.n_anchors_per_pos, self.fmap_h, self.fmap_w), device=x.device)
+        lane_features += self.anchors # self.anchors.shape = A*(2+2+S+1)xHfxWf
+        for i in range(self.n_anchors_per_pos):
+            lane_features[:, i*self.n_pred_per_anchor:i*self.n_pred_per_anchor+2, :, :] = cls_features[:, i*2:(i+1)*2,: ,:]
+            lane_features[:, i*(self.n_pred_per_anchor)+4:(i+1)*(self.n_pred_per_anchor), :, :] += reg_features[:, i*(self.n_offsets+1):(i+1)*(self.n_offsets+1), :, :]
 
-        proposals_list = self.nms(reg_proposals, nms_thresh, nms_topk, conf_threshold)
+        # Now select only the lane features from the left, bottom and right. Bx(A*(2+2+S+1))x(2*Hf+Wf)
+        lane_proposals = torch.zeros((batch_size, self.n_pred_per_anchor*self.n_anchors_per_pos, self.fmap_w + 2*self.fmap_h), device=x.device)
+        lane_proposals[:, :, :self.fmap_h] = lane_features[:, :, :, 0] # left image border
+        lane_proposals[:, :, self.fmap_h: 2 * self.fmap_h] = lane_features[:, :, : , -1] # right image border
+        lane_proposals[:, :, 2 * self.fmap_h: 2 * self.fmap_h + self.fmap_w] = lane_features[: ,: , -1, :] # bottom row
 
-    def forward_old(self, x, conf_threshold=None, nms_thres=0, nms_topk=3000):
-        batch_features = self.feature_extractor(x)
-        batch_features = self.conv1(batch_features)
-        batch_anchor_features = self.cut_anchor_features(batch_features)
+        # Bx(A*(2+2+S+1))x(2*Hf+Wf) -> BxA*(2*Hf+Wf)x(2+2+S+1)
+        lane_proposals_anch_dim = torch.zeros((lane_proposals.shape[0], self.n_anchors_per_pos*(self.fmap_w + 2*self.fmap_h), self.n_pred_per_anchor), device=x.device)
+        for pos_ix in range((self.fmap_w + 2*self.fmap_h)):
+            for a_ix in range(self.n_anchors_per_pos):
+                lane_proposals_anch_dim[:, a_ix*(pos_ix+1), :] = lane_proposals[:, a_ix*self.n_pred_per_anchor:(a_ix+1)*self.n_pred_per_anchor, pos_ix]
 
-        # Join proposals from all images into a single proposals features batch
-        batch_anchor_features = batch_anchor_features.view(-1, self.anchor_feat_channels * self.fmap_h)
-
-        # Predict
-        cls_logits = self.cls_layer(batch_anchor_features)
-        reg = self.reg_layer(batch_anchor_features)
-
-        # Undo joining
-        cls_logits = cls_logits.reshape(x.shape[0], -1, cls_logits.shape[1])
-        reg = reg.reshape(x.shape[0], -1, reg.shape[1])
-
-        # Add offsets to anchors
-        reg_proposals = torch.zeros((*cls_logits.shape[:2], 5 + self.n_offsets), device=x.device)
-        reg_proposals += self.anchors
-        reg_proposals[:, :, :2] = cls_logits
-        reg_proposals[:, :, 4:] += reg
-
-        # Apply nms
-        proposals_list = self.nms(reg_proposals, nms_thres, nms_topk, conf_threshold)
-
-        return proposals_list
+        lane_proposal_list = self.nms(lane_proposals_anch_dim[: ,:1000 ,: ], nms_thres, nms_topk, conf_threshold)
+        return lane_proposal_list
 
     def nms(self, batch_proposals, nms_thres, nms_topk, conf_threshold):
         softmax = nn.Softmax(dim=1)
@@ -150,13 +159,13 @@ class LaneATT(nn.Module):
                     scores = scores[above_threshold]
                     anchor_inds = anchor_inds[above_threshold]
                 if proposals.shape[0] == 0:
-                    proposals_list.append((proposals[[]], self.anchors[[]], None))
+                    proposals_list.append((proposals[[]], self.anchors_anchor_dim[[]], None))
                     continue
                 keep, num_to_keep, _ = nms(proposals, scores, overlap=nms_thres, top_k=nms_topk)
                 keep = keep[:num_to_keep]
             proposals = proposals[keep]
             anchor_inds = anchor_inds[keep]
-            proposals_list.append((proposals, self.anchors[keep], anchor_inds))
+            proposals_list.append((proposals, self.anchors_anchor_dim[keep], anchor_inds))
 
         return proposals_list
 
@@ -167,7 +176,7 @@ class LaneATT(nn.Module):
         reg_loss = 0
         valid_imgs = len(targets)
         total_positives = 0
-        for (proposals, anchors, _, _), target in zip(proposals_list, targets):
+        for (proposals, anchors, _), target in zip(proposals_list, targets):
             # Filter lanes that do not exist (confidence == 0)
             target = target[target[:, 1] == 1]
             if len(target) == 0:
@@ -230,38 +239,21 @@ class LaneATT(nn.Module):
         loss = cls_loss_weight * cls_loss + reg_loss
         return loss, {'cls_loss': cls_loss, 'reg_loss': reg_loss, 'batch_positives': total_positives}
 
-    def compute_anchor_cut_indices(self, n_fmaps, fmaps_w, fmaps_h):
-        # definitions
-        n_proposals = len(self.anchors_cut)
-
-        # indexing
-        unclamped_xs = torch.flip((self.anchors_cut[:, 5:] / self.stride).round().long(), dims=(1,))
-        unclamped_xs = unclamped_xs.unsqueeze(2)
-        unclamped_xs = torch.repeat_interleave(unclamped_xs, n_fmaps, dim=0).reshape(-1, 1)
-        cut_xs = torch.clamp(unclamped_xs, 0, fmaps_w - 1)
-        unclamped_xs = unclamped_xs.reshape(n_proposals, n_fmaps, fmaps_h, 1)
-        invalid_mask = (unclamped_xs < 0) | (unclamped_xs > fmaps_w)
-        cut_ys = torch.arange(0, fmaps_h)
-        cut_ys = cut_ys.repeat(n_fmaps * n_proposals)[:, None].reshape(n_proposals, n_fmaps, fmaps_h)
-        cut_ys = cut_ys.reshape(-1, 1)
-        cut_zs = torch.arange(n_fmaps).repeat_interleave(fmaps_h).repeat(n_proposals)[:, None]
-
-        return cut_zs, cut_ys, cut_xs, invalid_mask
-
     def draw_anchors(self, img_w, img_h, k=None):
         base_ys = self.anchor_ys.numpy()
-        img = np.zeros((img_h, img_w, 3), dtype=np.uint8)
+        img = plt.imread("/home/vincentmayer/repos/LaneATT/datasets/tusimple/clips/0531/1492626274615008344/2.jpg")
         i = -1
-        for anchor in self.anchors:
+        for anchor in self.anchors_anchor_dim:
             i += 1
-            if k is not None and i != k:
-                continue
+            if k is not None and i > k:
+                break
             anchor = anchor.numpy()
             xs = anchor[5:]
+            print(f"SHAPE: {xs.shape}")
             ys = base_ys * img_h
-            points = np.vstack((xs, ys)).T.round().astype(int)
-            for p_curr, p_next in zip(points[:-1], points[1:]):
-                img = cv2.line(img, tuple(p_curr), tuple(p_next), color=(0, 255, 0), thickness=5)
+            plt.imshow(img)
+            plt.plot(xs, ys, color='g', markersize=3)
+            plt.show()
 
         return img
 
@@ -326,20 +318,14 @@ class LaneATT(nn.Module):
         cuda_self = super().cuda(device)
         cuda_self.anchors = cuda_self.anchors.cuda(device)
         cuda_self.anchor_ys = cuda_self.anchor_ys.cuda(device)
-        cuda_self.cut_zs = cuda_self.cut_zs.cuda(device)
-        cuda_self.cut_ys = cuda_self.cut_ys.cuda(device)
-        cuda_self.cut_xs = cuda_self.cut_xs.cuda(device)
-        cuda_self.invalid_mask = cuda_self.invalid_mask.cuda(device)
+        cuda_self.anchors_anchor_dim = cuda_self.anchors_anchor_dim.cuda(device)
         return cuda_self
 
     def to(self, *args, **kwargs):
         device_self = super().to(*args, **kwargs)
         device_self.anchors = device_self.anchors.to(*args, **kwargs)
         device_self.anchor_ys = device_self.anchor_ys.to(*args, **kwargs)
-        device_self.cut_zs = device_self.cut_zs.to(*args, **kwargs)
-        device_self.cut_ys = device_self.cut_ys.to(*args, **kwargs)
-        device_self.cut_xs = device_self.cut_xs.to(*args, **kwargs)
-        device_self.invalid_mask = device_self.invalid_mask.to(*args, **kwargs)
+        device_self.anchors_anchor_dim = device_self.anchors_anchor_dim.to(*args, **kwargs)
         return device_self
 
 
