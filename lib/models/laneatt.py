@@ -1,6 +1,6 @@
 import math
 
-import cv2
+from PIL import Image
 import torch
 import numpy as np
 import torch.nn as nn
@@ -28,7 +28,7 @@ class LaneATT(nn.Module):
         super(LaneATT, self).__init__()
         # Some definitions
         self.feature_extractor, backbone_nb_channels, self.stride = get_backbone(backbone, pretrained_backbone)
-        self.img_w = img_w
+        self.img_w, self.img_h = img_w, img_h
         self.n_strips = S - 1
         self.n_offsets = S
         self.fmap_h = img_h // self.stride
@@ -39,23 +39,27 @@ class LaneATT(nn.Module):
         # Anchor angles, same ones used in Line-CNN
         self.anchor_angles = [15., 22., 30., 39., 49., 60., 72, 80., 90., 100, 108., 120., 131., 141., 150., 158., 165.]
         self.n_anchors_per_pos = len(self.anchor_angles) # 17
+        self.n_anchor_pos_edges = self.fmap_w + 2*self.fmap_h
 
-        # Generate anchors Anchor vec = [p(pos), p(neg), x_o, y_o, L, d1, ..., dS]
+        # Generate anchors Anchor vec = [p(pos), p(neg), y_o, x_o, L, d1, ..., dS]
         self.n_pred_per_anchor = 2 + 2 + 1 + self.n_offsets
+        # 1309x90x160
         self.anchors = self.generate_anchors(self.anchor_angles, self.fmap_h, self.fmap_w) # (N_pred_per_anchor*N_angles)xHfxWf
         
         # Now keep another anchor tensor that holds only the stacked anchors from the sides and bottom
-        # (A*(2+2+S+1))x(2*Hf+Wf)
-        self.anchors_anchor_dim_0 = torch.zeros((self.n_pred_per_anchor*self.n_anchors_per_pos, self.fmap_w + 2*self.fmap_h))
-        self.anchors_anchor_dim_0[:, :self.fmap_h] = self.anchors[:, :, 0] # left image border
-        self.anchors_anchor_dim_0[:, self.fmap_h: 2 * self.fmap_h] = self.anchors[:, : , -1] # right image border
-        self.anchors_anchor_dim_0[:, 2 * self.fmap_h: 2 * self.fmap_h + self.fmap_w] = self.anchors[: , -1, :] # bottom row
+        # (A*(2+2+S+1))x(2*Hf+Wf) = 1309x340
+        self.edge_anchors = torch.cat([self.anchors[:, :, 0], self.anchors[:, :, -1], self.anchors[: , -1, :]], 1)
 
-        # A*N_pred*Hf*Wf -> A*(2*Hf+Wf)xN_pred
-        self.anchors_anchor_dim = torch.zeros((self.n_anchors_per_pos*(self.fmap_w + 2*self.fmap_h), self.n_pred_per_anchor))
-        for pos_ix in range((self.fmap_w + 2*self.fmap_h)):
+        # A*N_pred*Hf*Wf -> A*(2*Hf+Wf)xN_pred = 5780x77
+        self.anchors_anchor_dim = torch.zeros((self.n_anchors_per_pos*self.n_anchor_pos_edges, self.n_pred_per_anchor))
+        for pos_ix in range(self.n_anchor_pos_edges):
+            i = 0
             for a_ix in range(self.n_anchors_per_pos):
-                self.anchors_anchor_dim[a_ix*(pos_ix+1), :] = self.anchors_anchor_dim_0[a_ix*self.n_pred_per_anchor:(a_ix+1)*self.n_pred_per_anchor, pos_ix]
+                single_anchor = self.edge_anchors[a_ix*self.n_pred_per_anchor:(a_ix+1)*self.n_pred_per_anchor, pos_ix]
+                self.anchors_anchor_dim[pos_ix*self.n_anchors_per_pos + a_ix, :] = single_anchor
+                print(f"Col {pos_ix*self.n_anchors_per_pos + a_ix}")
+                print(f"Origin: x,y {single_anchor[2:4]}")
+                print(f"Angle: {single_anchor[4]}")
 
         # Setup and initialize layers
         conv_out_channels = 1024
@@ -104,13 +108,14 @@ class LaneATT(nn.Module):
     def generate_anchor(self, start, angle):
         anchor_ys = self.anchor_ys
         anchor = torch.zeros(self.n_pred_per_anchor)
-        angle = angle * math.pi / 180.  # degrees to radians
+        angle_rad = angle * math.pi / 180.  # degrees to radians
         start_x, start_y = start
         # anchor[:2] are the probabilities of positive/negative anchor
         anchor[2] = 1 - start_y
         anchor[3] = start_x
         # anchor[4] is the length
-        anchor[5:] = (start_x + (1 - anchor_ys - 1 + start_y) / math.tan(angle)) * self.img_w
+        anchor[4] = angle
+        anchor[5:] = (start_x + (1 - anchor_ys - 1 + start_y) / math.tan(angle_rad)) * self.img_w
         return anchor
 
     def forward(self, x, conf_threshold=None, nms_thres=0, nms_topk=6000):
@@ -130,16 +135,14 @@ class LaneATT(nn.Module):
             lane_features[:, i*(self.n_pred_per_anchor)+4:(i+1)*(self.n_pred_per_anchor), :, :] += reg_features[:, i*(self.n_offsets+1):(i+1)*(self.n_offsets+1), :, :]
 
         # Now select only the lane features from the left, bottom and right. Bx(A*(2+2+S+1))x(2*Hf+Wf)
-        lane_proposals = torch.zeros((batch_size, self.n_pred_per_anchor*self.n_anchors_per_pos, self.fmap_w + 2*self.fmap_h), device=x.device)
-        lane_proposals[:, :, :self.fmap_h] = lane_features[:, :, :, 0] # left image border
-        lane_proposals[:, :, self.fmap_h: 2 * self.fmap_h] = lane_features[:, :, : , -1] # right image border
-        lane_proposals[:, :, 2 * self.fmap_h: 2 * self.fmap_h + self.fmap_w] = lane_features[: ,: , -1, :] # bottom row
+        lane_proposals = torch.cat([lane_features[:, :, :, 0], lane_features[:, :, :, -1], lane_features[: ,: , -1, :]], 1)
 
         # Bx(A*(2+2+S+1))x(2*Hf+Wf) -> BxA*(2*Hf+Wf)x(2+2+S+1)
-        lane_proposals_anch_dim = torch.zeros((lane_proposals.shape[0], self.n_anchors_per_pos*(self.fmap_w + 2*self.fmap_h), self.n_pred_per_anchor), device=x.device)
-        for pos_ix in range((self.fmap_w + 2*self.fmap_h)):
+        lane_proposals_anch_dim = torch.zeros((lane_proposals.shape[0], self.n_anchors_per_pos*self.n_anchor_pos_edges, self.n_pred_per_anchor), device=x.device)
+        for pos_ix in range(self.n_anchor_pos_edges):
             for a_ix in range(self.n_anchors_per_pos):
-                lane_proposals_anch_dim[:, a_ix*(pos_ix+1), :] = lane_proposals[:, a_ix*self.n_pred_per_anchor:(a_ix+1)*self.n_pred_per_anchor, pos_ix]
+                proposal = lane_proposals[:, a_ix*self.n_pred_per_anchor:(a_ix+1)*self.n_pred_per_anchor, pos_ix]
+                lane_proposals_anch_dim[:, pos_ix*self.n_anchors_per_pos + a_ix, :] = proposal
 
         lane_proposal_list = self.nms(lane_proposals_anch_dim[: ,:1000 ,: ], nms_thres, nms_topk, conf_threshold)
         return lane_proposal_list
@@ -240,21 +243,32 @@ class LaneATT(nn.Module):
         return loss, {'cls_loss': cls_loss, 'reg_loss': reg_loss, 'batch_positives': total_positives}
 
     def draw_anchors(self, img_w, img_h, k=None):
+        from IPython.display import clear_output
+        import time
         base_ys = self.anchor_ys.numpy()
-        img = plt.imread("/home/vincentmayer/repos/LaneATT/datasets/tusimple/clips/0531/1492626274615008344/2.jpg")
+        img = Image.open("/home/vincentmayer/repos/LaneATT/datasets/tusimple/clips/0531/1492626274615008344/2.jpg").resize((self.img_w, self.img_h))
         i = -1
         for anchor in self.anchors_anchor_dim:
             i += 1
-            if k is not None and i > k:
-                break
+            # if k is not None and i != k:
+            #     continue
             anchor = anchor.numpy()
+            anchor_start_x_img = anchor[3]*img_w
+            anchor_start_y_img = (1-anchor[2])*img_h
+            print(f"Start_x {anchor_start_x_img} Start_y: {anchor_start_y_img}")
+            # get the anchor x,y coordinates and coords in image
             xs = anchor[5:]
-            print(f"SHAPE: {xs.shape}")
             ys = base_ys * img_h
-            plt.imshow(img)
-            plt.plot(xs, ys, color='g', markersize=3)
+            xs_in_img = xs[(xs<=img_w) * (xs>=0)]
+            ys_in_img = ys[(xs<=img_w) * (xs>=0)]
+            plt.imshow(img, origin="upper")
+            # plot anchor origin and anchor line
+            plt.plot(anchor_start_x_img, anchor_start_y_img, color='r', markersize=10, marker="o")
+            plt.plot(xs_in_img, ys_in_img, color='g', markersize=3, marker='o')
             plt.show()
-
+            # loop visualuization in jupyter notebook
+            clear_output(wait=True)
+            time.sleep(0.2)
         return img
 
     @staticmethod
