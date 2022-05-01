@@ -53,13 +53,9 @@ class LaneATT(nn.Module):
         # A*N_pred*Hf*Wf -> A*(2*Hf+Wf)xN_pred = 5780x77
         self.anchors_anchor_dim = torch.zeros((self.n_anchors_per_pos*self.n_anchor_pos_edges, self.n_pred_per_anchor))
         for pos_ix in range(self.n_anchor_pos_edges):
-            i = 0
             for a_ix in range(self.n_anchors_per_pos):
                 single_anchor = self.edge_anchors[a_ix*self.n_pred_per_anchor:(a_ix+1)*self.n_pred_per_anchor, pos_ix]
                 self.anchors_anchor_dim[pos_ix*self.n_anchors_per_pos + a_ix, :] = single_anchor
-                print(f"Col {pos_ix*self.n_anchors_per_pos + a_ix}")
-                print(f"Origin: x,y {single_anchor[2:4]}")
-                print(f"Angle: {single_anchor[4]}")
 
         # Setup and initialize layers
         conv_out_channels = 1024
@@ -114,7 +110,7 @@ class LaneATT(nn.Module):
         anchor[2] = 1 - start_y
         anchor[3] = start_x
         # anchor[4] is the length
-        anchor[4] = angle
+        # anchor[4] = angle
         anchor[5:] = (start_x + (1 - anchor_ys - 1 + start_y) / math.tan(angle_rad)) * self.img_w
         return anchor
 
@@ -135,7 +131,7 @@ class LaneATT(nn.Module):
             lane_features[:, i*(self.n_pred_per_anchor)+4:(i+1)*(self.n_pred_per_anchor), :, :] += reg_features[:, i*(self.n_offsets+1):(i+1)*(self.n_offsets+1), :, :]
 
         # Now select only the lane features from the left, bottom and right. Bx(A*(2+2+S+1))x(2*Hf+Wf)
-        lane_proposals = torch.cat([lane_features[:, :, :, 0], lane_features[:, :, :, -1], lane_features[: ,: , -1, :]], 1)
+        lane_proposals = torch.cat([lane_features[:, :, :, 0], lane_features[:, :, :, -1], lane_features[: ,: , -1, :]], 2)
 
         # Bx(A*(2+2+S+1))x(2*Hf+Wf) -> BxA*(2*Hf+Wf)x(2+2+S+1)
         lane_proposals_anch_dim = torch.zeros((lane_proposals.shape[0], self.n_anchors_per_pos*self.n_anchor_pos_edges, self.n_pred_per_anchor), device=x.device)
@@ -144,7 +140,7 @@ class LaneATT(nn.Module):
                 proposal = lane_proposals[:, a_ix*self.n_pred_per_anchor:(a_ix+1)*self.n_pred_per_anchor, pos_ix]
                 lane_proposals_anch_dim[:, pos_ix*self.n_anchors_per_pos + a_ix, :] = proposal
 
-        lane_proposal_list = self.nms(lane_proposals_anch_dim[: ,:1000 ,: ], nms_thres, nms_topk, conf_threshold)
+        lane_proposal_list = self.nms(lane_proposals_anch_dim, nms_thres, nms_topk, conf_threshold)
         return lane_proposal_list
 
     def nms(self, batch_proposals, nms_thres, nms_topk, conf_threshold):
