@@ -3,7 +3,7 @@ val_every: 10
 model_checkpoint_interval: 1
 seed: 0
 model:
-  name: LaneATT
+  name: LaneATT_no_att
   parameters:
     backbone: resnet18
     S: &S 72

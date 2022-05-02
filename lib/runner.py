@@ -28,7 +28,7 @@ class Runner:
 
     def train(self):
         self.exp.train_start_callback(self.cfg)
-        starting_epoch = 1
+        starting_epoch = 0
         model = self.cfg.get_model()
         model = model.to(self.device)
         optimizer = self.cfg.get_optimizer(model.parameters())
