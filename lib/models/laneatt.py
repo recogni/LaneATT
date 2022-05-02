@@ -43,7 +43,7 @@ class LaneATT(nn.Module):
         self.bottom_angles = [165., 150., 141., 131., 120., 108., 100., 90., 80., 72., 60., 49., 39., 30., 15.]
 
         # Generate anchors
-        self.anchors, self.anchors_cut = self.generate_anchors(lateral_n=72, bottom_n=128)
+        self.anchors, self.anchors_cut, self.start_positions = self.generate_anchors(lateral_n=72, bottom_n=128)
 
         # Filter masks if `anchors_freq_path` is provided
         if anchors_freq_path is not None:
@@ -52,15 +52,15 @@ class LaneATT(nn.Module):
             ind = torch.argsort(anchors_mask, descending=True)[:topk_anchors]
             self.anchors = self.anchors[ind]
             self.anchors_cut = self.anchors_cut[ind]
+            self.start_positions = self.start_positions[ind]
 
         # Pre compute indices for the anchor pooling
-        self.cut_zs, self.cut_ys, self.cut_xs, self.invalid_mask = self.compute_anchor_cut_indices(
-            self.anchor_feat_channels, fmap_w, self.fmap_h)
+        self.cut_xs, self.cut_ys = self.compute_anchor_cut_indices(fmap_w, self.fmap_h)
 
         # Setup and initialize layers
         self.conv1 = nn.Conv2d(backbone_nb_channels, self.anchor_feat_channels, kernel_size=1)
-        self.cls_layer = nn.Linear(self.anchor_feat_channels * self.fmap_h, 2)
-        self.reg_layer = nn.Linear(self.anchor_feat_channels * self.fmap_h, self.n_offsets + 1)
+        self.cls_layer = nn.Linear(self.anchor_feat_channels, 2)
+        self.reg_layer = nn.Linear(self.anchor_feat_channels, self.n_offsets + 1)
         # self.attention_layer = nn.Linear(self.anchor_feat_channels * self.fmap_h, len(self.anchors) - 1)
         # self.initialize_layer(self.attention_layer)
         self.initialize_layer(self.conv1)
@@ -70,10 +70,11 @@ class LaneATT(nn.Module):
     def forward(self, x, conf_threshold=None, nms_thres=0, nms_topk=3000):
         batch_features = self.feature_extractor(x)
         batch_features = self.conv1(batch_features)
+
         batch_anchor_features = self.cut_anchor_features(batch_features)
 
         # Join proposals from all images into a single proposals features batch
-        batch_anchor_features = batch_anchor_features.view(-1, self.anchor_feat_channels * self.fmap_h)
+        batch_anchor_features = batch_anchor_features.view(-1, self.anchor_feat_channels)
 
         # Add attention features
 
@@ -206,55 +207,41 @@ class LaneATT(nn.Module):
         loss = cls_loss_weight * cls_loss + reg_loss
         return loss, {'cls_loss': cls_loss, 'reg_loss': reg_loss, 'batch_positives': total_positives}
 
-    def compute_anchor_cut_indices(self, n_fmaps, fmaps_w, fmaps_h):
-        # definitions
-        n_proposals = len(self.anchors_cut)
-
+    def compute_anchor_cut_indices(self, fmaps_w, fmaps_h):
         # indexing
-        unclamped_xs = torch.flip((self.anchors_cut[:, 5:] / self.stride).round().long(), dims=(1,))
-        unclamped_xs = unclamped_xs.unsqueeze(2)
-        unclamped_xs = torch.repeat_interleave(unclamped_xs, n_fmaps, dim=0).reshape(-1, 1)
-        cut_xs = torch.clamp(unclamped_xs, 0, fmaps_w - 1)
-        unclamped_xs = unclamped_xs.reshape(n_proposals, n_fmaps, fmaps_h, 1)
-        invalid_mask = (unclamped_xs < 0) | (unclamped_xs > fmaps_w)
-        cut_ys = torch.arange(0, fmaps_h)
-        cut_ys = cut_ys.repeat(n_fmaps * n_proposals)[:, None].reshape(n_proposals, n_fmaps, fmaps_h)
-        cut_ys = cut_ys.reshape(-1, 1)
-        cut_zs = torch.arange(n_fmaps).repeat_interleave(fmaps_h).repeat(n_proposals)[:, None]
+        start_x = (self.start_positions[:, 0] * (fmaps_w-1)).round().long()  # in feature map coordinates
+        start_y = (self.start_positions[:, 1] * (fmaps_h-1)).round().long()  # in feature map coordinates
 
-        cut_ys_reshaped = torch.reshape(cut_ys, invalid_mask.shape)
-        not_side_mask = ~((cut_ys_reshaped == fmaps_h - 1) | (unclamped_xs == 0) | (unclamped_xs == fmaps_w - 1))
-        invalid_mask |= not_side_mask
-
-        return cut_zs, cut_ys, cut_xs, invalid_mask
+        return start_x, start_y
 
     def cut_anchor_features(self, features):
         # definitions
         batch_size = features.shape[0]
         n_proposals = len(self.anchors)
         n_fmaps = features.shape[1]
-        batch_anchor_features = torch.zeros((batch_size, n_proposals, n_fmaps, self.fmap_h, 1), device=features.device)
+        batch_anchor_features = torch.zeros((batch_size, n_proposals, n_fmaps), device=features.device)
 
         # actual cutting
         for batch_idx, img_features in enumerate(features):
-            rois = img_features[self.cut_zs, self.cut_ys, self.cut_xs].view(n_proposals, n_fmaps, self.fmap_h, 1)
-            rois[self.invalid_mask] = 0
+            rois = img_features[:, self.cut_ys, self.cut_xs].view(n_proposals, n_fmaps)  # n_proposals, n_fmaps
             batch_anchor_features[batch_idx] = rois
 
-        return batch_anchor_features
+        return batch_anchor_features  # batch_size, n_proposals, n_fmaps
 
     def generate_anchors(self, lateral_n, bottom_n):
-        left_anchors, left_cut = self.generate_side_anchors(self.left_angles, x=0., nb_origins=lateral_n)
-        right_anchors, right_cut = self.generate_side_anchors(self.right_angles, x=1., nb_origins=lateral_n)
-        bottom_anchors, bottom_cut = self.generate_side_anchors(self.bottom_angles, y=1., nb_origins=bottom_n)
+        left_anchors, left_cut, left_start = self.generate_side_anchors(self.left_angles, x=0., nb_origins=lateral_n)
+        right_anchors, right_cut, right_start = self.generate_side_anchors(self.right_angles, x=1., nb_origins=lateral_n)
+        bottom_anchors, bottom_cut, bottom_start = self.generate_side_anchors(self.bottom_angles, y=1., nb_origins=bottom_n)
 
-        return torch.cat([left_anchors, bottom_anchors, right_anchors]), torch.cat([left_cut, bottom_cut, right_cut])
+        return (torch.cat([left_anchors, bottom_anchors, right_anchors]),
+                torch.cat([left_cut, bottom_cut, right_cut]),
+                torch.cat([left_start, bottom_start, right_start]))
 
     def generate_side_anchors(self, angles, nb_origins, x=None, y=None):
         if x is None and y is not None:
-            starts = [(x, y) for x in np.linspace(1., 0., num=nb_origins)]
+            starts = [[x, y] for x in np.linspace(1., 0., num=nb_origins)]
         elif x is not None and y is None:
-            starts = [(x, y) for y in np.linspace(1., 0., num=nb_origins)]
+            starts = [[x, y] for y in np.linspace(1., 0., num=nb_origins)]
         else:
             raise Exception('Please define exactly one of `x` or `y` (not neither nor both)')
 
@@ -270,7 +257,7 @@ class LaneATT(nn.Module):
                 anchors[k] = self.generate_anchor(start, angle)
                 anchors_cut[k] = self.generate_anchor(start, angle, cut=True)
 
-        return anchors, anchors_cut
+        return anchors, anchors_cut, torch.tensor(starts).repeat_interleave(len(angles), dim=0)
 
     def generate_anchor(self, start, angle, cut=False):
         if cut:
@@ -375,10 +362,10 @@ class LaneATT(nn.Module):
         device_self = super().to(*args, **kwargs)
         device_self.anchors = device_self.anchors.to(*args, **kwargs)
         device_self.anchor_ys = device_self.anchor_ys.to(*args, **kwargs)
-        device_self.cut_zs = device_self.cut_zs.to(*args, **kwargs)
+        # device_self.starts = device_self.starts.to(*args, **kwargs)
         device_self.cut_ys = device_self.cut_ys.to(*args, **kwargs)
         device_self.cut_xs = device_self.cut_xs.to(*args, **kwargs)
-        device_self.invalid_mask = device_self.invalid_mask.to(*args, **kwargs)
+        # device_self.invalid_mask = device_self.invalid_mask.to(*args, **kwargs)
         return device_self
 
 

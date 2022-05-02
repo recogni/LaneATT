@@ -114,7 +114,8 @@ class Experiment:
 
     def epoch_end_callback(self, epoch, max_epochs, model, optimizer, scheduler):
         self.logger.debug('Epoch [%d/%d] finished.', epoch, max_epochs)
-        if epoch % self.cfg['model_checkpoint_interval'] == 0:
+        if (epoch + 1) % self.cfg['model_checkpoint_interval'] == 0:
+            print(f"Saving model at epoch: {epoch + 1}")
             self.save_train_state(epoch, model, optimizer, scheduler)
 
     def train_start_callback(self, cfg):
