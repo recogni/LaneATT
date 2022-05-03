@@ -288,7 +288,7 @@ class LaneDataset(Dataset):
         if self.normalize:
             img = (img - IMAGENET_MEAN) / IMAGENET_STD
         img = self.to_tensor(img.astype(np.float32))
-        return (img, label, idx)
+        return (img, item['path'], label, idx)
 
     def __len__(self):
         return len(self.dataset)
