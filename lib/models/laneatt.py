@@ -116,7 +116,6 @@ class LaneATT(nn.Module):
         proposals_list = []
 
         if not self.training:
-            print("Running NMS for evaluations.")
             for proposals, attention_matrix in zip(batch_proposals, batch_attention_matrix):
                 anchor_inds = torch.arange(batch_proposals.shape[1], device=proposals.device)
                 # The gradients do not have to (and can't) be calculated for the NMS procedure
