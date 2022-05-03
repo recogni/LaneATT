@@ -87,8 +87,8 @@ class TuSimple(LaneDatasetLoader):
                     'y_samples': y_samples
                 })
 
-        if self.split == 'train':
-            random.shuffle(self.annotations)
+        # if self.split == 'train':
+        #     random.shuffle(self.annotations)
         self.max_lanes = max_lanes
         self.logger.info('%d annotations loaded, with a maximum of %d lanes in an image.', len(self.annotations),
                          self.max_lanes)

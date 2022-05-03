@@ -47,7 +47,7 @@ class LaneATT(nn.Module):
         self.anchors = self.generate_anchors(self.anchor_angles, self.fmap_h, self.fmap_w) # (N_pred_per_anchor*N_angles)xHfxWf
         
         # Now keep another anchor tensor that holds only the stacked anchors from the sides and bottom
-        # (A*(2+2+S+1))x(2*Hf+Wf) = 1309x340
+        # (A*(2+2+S+1))x(2*Hf+Wf) = (77*17)1309x340
         self.edge_anchors = torch.cat([self.anchors[:, :, 0], self.anchors[:, :, -1], self.anchors[: , -1, :]], 1)
 
         # A*N_pred*Hf*Wf -> A*(2*Hf+Wf)xN_pred = 5780x77
@@ -95,9 +95,9 @@ class LaneATT(nn.Module):
         for i, origin in enumerate(origins):
             anchors_at_origin = torch.empty((0))
             for angle in angles:
-                anchor_with_angle = self.generate_anchor(origin, angle)
+                anchor_with_angle = self.generate_anchor(origin, angle) # shape 77x1
                 anchors_at_origin = torch.cat([anchors_at_origin, anchor_with_angle], 0)
-            anchors[:, i] = anchors_at_origin
+            anchors[:, i] = anchors_at_origin # shape (77*17=n_pred_per_anchor*n_angles)
 
         return anchors
 
@@ -110,7 +110,6 @@ class LaneATT(nn.Module):
         anchor[2] = 1 - start_y
         anchor[3] = start_x
         # anchor[4] is the length
-        # anchor[4] = angle
         anchor[5:] = (start_x + (1 - anchor_ys - 1 + start_y) / math.tan(angle_rad)) * self.img_w
         return anchor
 
