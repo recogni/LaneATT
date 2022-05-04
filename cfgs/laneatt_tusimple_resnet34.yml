@@ -11,6 +11,7 @@ model:
     anchors_freq_path: 'data/tusimple_anchors_freq.pt'
     img_h: &img_h 360
     img_w: &img_w 640
+    anchor_feat_channels: 1024
 batch_size: 8
 epochs: 100
 loss_parameters: {}
@@ -55,7 +56,7 @@ datasets:
           parameters:
             p: 0.5
 
-      root: "datasets/tusimple"
+      root: "/home/alok/datasets/tusimple"
 
   test:
     type: LaneDataset
@@ -68,7 +69,7 @@ datasets:
       normalize: false
       aug_chance: 0
       augmentations:
-      root: "datasets/tusimple-test"
+      root: "/home/alok/datasets/tusimple-test"
 
   val:
     type: LaneDataset
@@ -81,4 +82,4 @@ datasets:
       normalize: false
       aug_chance: 0
       augmentations:
-      root: "datasets/tusimple"
+      root: "/home/alok/datasets/tusimple"
