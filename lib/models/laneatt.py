@@ -139,26 +139,33 @@ class LaneATT(nn.Module):
     def nms(self, batch_proposals, nms_thres, nms_topk, conf_threshold):
         softmax = nn.Softmax(dim=1)
         proposals_list = []
-        for proposals in batch_proposals:
-            anchor_inds = torch.arange(batch_proposals.shape[1], device=proposals.device)
-            # The gradients do not have to (and can't) be calculated for the NMS procedure
-            with torch.no_grad():
-                scores = softmax(proposals[:, :2])[:, 1]
-                if conf_threshold is not None:
-                    # apply confidence threshold
-                    above_threshold = scores > conf_threshold
-                    proposals = proposals[above_threshold]
-                    scores = scores[above_threshold]
-                    anchor_inds = anchor_inds[above_threshold]
-                if proposals.shape[0] == 0:
-                    proposals_list.append((proposals[[]], self.anchors_anchor_dim[[]], None))
-                    continue
-                keep, num_to_keep, _ = nms(proposals, scores, overlap=nms_thres, top_k=nms_topk)
-                keep = keep[:num_to_keep]
-            proposals = proposals[keep]
-            anchor_inds = anchor_inds[keep]
-            proposals_list.append((proposals, self.anchors_anchor_dim[keep], anchor_inds))
 
+        if not self.training:
+            print("Running NMS for evaluations.")
+            for proposals, attention_matrix in zip(batch_proposals, batch_attention_matrix):
+                anchor_inds = torch.arange(batch_proposals.shape[1], device=proposals.device)
+                # The gradients do not have to (and can't) be calculated for the NMS procedure
+                with torch.no_grad():
+                    scores = softmax(proposals[:, :2])[:, 1]
+                    if conf_threshold is not None:
+                        # apply confidence threshold
+                        above_threshold = scores > conf_threshold
+                        proposals = proposals[above_threshold]
+                        scores = scores[above_threshold]
+                        anchor_inds = anchor_inds[above_threshold]
+                    if proposals.shape[0] == 0:
+                        proposals_list.append((proposals[[]], self.anchors[[]], attention_matrix[[]], None))
+                        continue
+                    keep, num_to_keep, _ = nms(proposals, scores, overlap=nms_thres, top_k=nms_topk)
+                    keep = keep[:num_to_keep]
+                proposals = proposals[keep]
+                anchor_inds = anchor_inds[keep]
+                attention_matrix = attention_matrix[anchor_inds]
+                proposals_list.append((proposals, self.anchors[keep], attention_matrix, anchor_inds))
+        else:
+            for proposals, attention_matrix in zip(batch_proposals, batch_attention_matrix):
+                anchor_inds = torch.arange(batch_proposals.shape[1], device=proposals.device)
+                proposals_list.append((proposals, self.anchors, attention_matrix, anchor_inds))
         return proposals_list
 
     def loss(self, proposals_list, targets, cls_loss_weight=10):
