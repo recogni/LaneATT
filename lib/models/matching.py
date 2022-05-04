@@ -1,9 +1,13 @@
 import torch
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from . import LaneATT
+
 INFINITY = 987654.
 
 
-def match_proposals_with_targets(model, proposals, targets, t_pos=15., t_neg=20.):
+def match_proposals_with_targets(model: "LaneATT", proposals, targets, t_pos=15., t_neg=20.):
     # repeat proposals and targets to generate all combinations
     num_proposals = proposals.shape[0]
     num_targets = targets.shape[0]
@@ -21,23 +25,24 @@ def match_proposals_with_targets(model, proposals, targets, t_pos=15., t_neg=20.
     targets = torch.cat(num_proposals * [targets])  # applying this 2 times on [c, d] gives [c, d, c, d]
 
     # get start and the intersection of offsets
-    targets_starts = targets[:, 2] * model.n_strips
-    proposals_starts = proposals[:, 2] * model.n_strips
+    targets_starts = targets[:, 2] * model.n_strips  # n_prop * n_targets
+    proposals_starts = proposals[:, 2] * model.n_strips # n_prop * n_targets
+
     starts = torch.max(targets_starts, proposals_starts).round().long()
     ends = (targets_starts + targets[:, 4] - 1).round().long()
     lengths = ends - starts + 1
     ends[lengths < 0] = starts[lengths < 0] - 1
-    lengths[lengths < 0] = 0  # a negative number here means no intersection, thus zero lenght
+    lengths[lengths < 0] = 0  # a negative number here means no intersection, thus zero length
 
     # generate valid offsets mask, which works like this:
     #   start with mask [0, 0, 0, 0, 0]
     #   suppose start = 1
     #   lenght = 2
-    valid_offsets_mask = targets.new_zeros(targets.shape)
-    all_indices = torch.arange(valid_offsets_mask.shape[0], dtype=torch.long, device=targets.device)
+    valid_offsets_mask = targets.new_zeros(targets.shape)  # n_prop * n_targets, 77 (5 + 72)
+    all_indices = torch.arange(valid_offsets_mask.shape[0], dtype=torch.long, device=targets.device)  # 0, 1, 2, 3, 4, ... n_prop * n_targets - 1
     #   put a one on index `start`, giving [0, 1, 0, 0, 0]
-    valid_offsets_mask[all_indices, 5 + starts] = 1.
-    valid_offsets_mask[all_indices, 5 + ends + 1] -= 1.
+    valid_offsets_mask[all_indices, 5 + starts] = 1.  # n_prop * n_targets
+    valid_offsets_mask[all_indices, 5 + ends + 1] -= 1.  # n_prop * n_targets
     #   put a -1 on the `end` index, giving [0, 1, 0, -1, 0]
     #   if lenght is zero, the previous line would put a one where it shouldnt be.
     #   this -=1 (instead of =-1) fixes this

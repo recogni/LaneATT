@@ -33,13 +33,14 @@ class LaneATT(nn.Module):
         self.n_offsets = S
         self.fmap_h = int(math.ceil(img_h / self.stride))
         self.fmap_w = int(math.ceil(img_w / self.stride))
-        self.anchor_ys = torch.linspace(1, 0, steps=self.n_offsets, dtype=torch.float32)
+        self.anchor_ys = torch.linspace(1, 0, steps=self.n_offsets, dtype=torch.float32)  # we want to sample from bottom to top in image.
         self.anchor_feat_channels = anchor_feat_channels
 
         # Anchor angles, same ones used in Line-CNN
-        self.anchor_angles = [15., 22., 30., 39., 49., 60., 72, 80., 90., 100, 108., 120., 131., 141., 150., 158., 165.]
-        self.n_angles = len(self.anchor_angles) # 17
-        self.n_anchor_pos_edges = self.fmap_w + 2*self.fmap_h
+        self.anchor_angles = [15., 22., 30., 39., 49., 60., 72., 80., 90., 100, 108., 120., 131., 141., 150., 158., 165.]
+
+        self.n_angles = len(self.anchor_angles)  # 17
+        self.n_anchor_pos = self.fmap_w + 2 * self.fmap_h
 
         # Generate anchors Anchor vec = [p(pos), p(neg), y_o, x_o, L, d1, ..., dS]
         self.n_anchor_properties = 2 + 2 + 1 + self.n_offsets
@@ -52,11 +53,11 @@ class LaneATT(nn.Module):
         self.edge_anchors = torch.cat([self.anchors[:, :, :, 0], self.anchors[:, :, :, -1], self.anchors[:, :, -1, :]], -1)
 
         # n_angles * (2*height + width), n_anchor_properties
-        self.anchors_anchor_dim = self.edge_anchors.permute([0, 2, 1]).reshape([-1, self.n_anchor_properties])
+        self.anchors_flat = self.edge_anchors.permute([0, 2, 1]).reshape([-1, self.n_anchor_properties])
 
         # Setup and initialize layers
         self.conv = nn.Conv2d(in_channels=backbone_nb_channels, out_channels=self.anchor_feat_channels, kernel_size=1)
-        self.head_conv = nn.Conv2d(in_channels=self.anchor_feat_channels, out_channels=self.n_angles * (2 + 1 + self.n_offsets), kernel_size=1)
+        self.head_conv = nn.Conv2d(in_channels=self.anchor_feat_channels, out_channels=self.n_angles * (self.n_anchor_properties - 2), kernel_size=1)
 
         self.initialize_layer(self.conv)
         self.initialize_layer(self.head_conv)
@@ -76,9 +77,9 @@ class LaneATT(nn.Module):
 
     def generate_side_anchors(self, angles, n_origins, x=None, y=None):
         if x is None and y is not None:
-            origins = [(x, y) for x in np.linspace(1., 0., num=n_origins)]
+            origins = [(x, y) for x in np.linspace(0., 1., num=n_origins)]
         elif x is not None and y is None:
-            origins = [(x, y) for y in np.linspace(1., 0., num=n_origins)]
+            origins = [(x, y) for y in np.linspace(0., 1., num=n_origins)]
         else:
             raise Exception('Please define exactly one of `x` or `y` (not neither nor both)')
 
@@ -87,21 +88,21 @@ class LaneATT(nn.Module):
         anchors = torch.zeros((self.n_angles, self.n_anchor_properties, n_origins))
         for j, origin in enumerate(origins):
             for i, angle in enumerate(angles):
-                anchors[i, :, j] = self.generate_anchor(origin, angle)  # num_anchor_properties,
+                anchors[i, :, j] = self.generate_anchor(origin, angle)  # num_anchor_properties
 
         return anchors  # n_angles, n_anchor_properties, n_origins
 
     def generate_anchor(self, start, angle) -> torch.Tensor:
-        anchor_ys = self.anchor_ys
+        anchor_ys = self.anchor_ys  # between [1,0]. starts from 1 and has n_offsets
         anchor = torch.zeros(self.n_anchor_properties)
         angle_rad = angle * math.pi / 180.  # degrees to radians
         start_x, start_y = start
         # anchor[:2] are the probabilities of positive/negative anchor
-        anchor[2] = 1 - start_y
+        anchor[2] = start_y
         anchor[3] = start_x
         # anchor[4] is the length
         # anchor[4] = angle
-        anchor[5:] = (start_x + (1 - anchor_ys - 1 + start_y) / math.tan(angle_rad)) * self.img_w
+        anchor[5:] = (start_x + (anchor_ys - start_y) / math.tan(angle_rad)) * self.img_w
         return anchor  # [num_anchor_properties, ]
 
     def forward(self, x, conf_threshold=None, nms_thres=0, nms_topk=6000):
@@ -121,17 +122,17 @@ class LaneATT(nn.Module):
         lane_proposals = torch.reshape(lane_proposals, [batch_size, (2 * self.fmap_h + self.fmap_w) * self.n_angles, -1])
 
         # 1, n_angles, (2 * Hf + Wf), n_anchor_properties
-        anchors_anchor_dim = torch.reshape(self.anchors_anchor_dim, (1, self.n_angles, (2 * self.fmap_h + self.fmap_w), -1))
+        anchors_flat = torch.reshape(self.anchors_flat, (1, self.n_angles, (2 * self.fmap_h + self.fmap_w), -1))
 
         # 1, (2 * Hf + Wf), n_angles, n_anchor_properties
-        anchors_anchor_dim = anchors_anchor_dim.permute([0, 2, 1, 3])
+        anchors_flat = anchors_flat.permute([0, 2, 1, 3])
         # 1, (2 * Hf + Wf)*n_angles, n_anchor_properties
-        anchors_anchor_dim = torch.reshape(anchors_anchor_dim, [1, -1, self.n_anchor_properties])
+        anchors_flat = torch.reshape(anchors_flat, [1, -1, self.n_anchor_properties])
         # BS, (2 * Hf + Wf)*n_angles, n_anchor_properties
-        anchors_anchor_dim = torch.cat([anchors_anchor_dim] * batch_size, axis=0)
+        anchors_flat = torch.cat([anchors_flat] * batch_size, axis=0)
 
         # BS, n_angles * (2*Hf + Wf), n_anchor_properties
-        lane_proposals = torch.cat([lane_proposals[..., :2], anchors_anchor_dim[..., 2:4], lane_proposals[..., 2:]], axis=-1)
+        lane_proposals = torch.cat([lane_proposals[..., :2], anchors_flat[..., 2:4], lane_proposals[..., 2:]], axis=-1)
 
         lane_proposal_list = self.nms(lane_proposals, nms_thres, nms_topk, conf_threshold)
         return lane_proposal_list
@@ -142,7 +143,7 @@ class LaneATT(nn.Module):
 
         if not self.training:
             print("Running NMS for evaluations.")
-            for proposals, attention_matrix in zip(batch_proposals, batch_attention_matrix):
+            for proposals in batch_proposals:
                 anchor_inds = torch.arange(batch_proposals.shape[1], device=proposals.device)
                 # The gradients do not have to (and can't) be calculated for the NMS procedure
                 with torch.no_grad():
@@ -154,18 +155,17 @@ class LaneATT(nn.Module):
                         scores = scores[above_threshold]
                         anchor_inds = anchor_inds[above_threshold]
                     if proposals.shape[0] == 0:
-                        proposals_list.append((proposals[[]], self.anchors[[]], attention_matrix[[]], None))
+                        proposals_list.append((proposals[[]], self.anchors_flat[[]], None))
                         continue
                     keep, num_to_keep, _ = nms(proposals, scores, overlap=nms_thres, top_k=nms_topk)
                     keep = keep[:num_to_keep]
                 proposals = proposals[keep]
                 anchor_inds = anchor_inds[keep]
-                attention_matrix = attention_matrix[anchor_inds]
-                proposals_list.append((proposals, self.anchors[keep], attention_matrix, anchor_inds))
+                proposals_list.append((proposals, self.anchors_flat[keep], anchor_inds))
         else:
-            for proposals, attention_matrix in zip(batch_proposals, batch_attention_matrix):
+            for proposals in batch_proposals:
                 anchor_inds = torch.arange(batch_proposals.shape[1], device=proposals.device)
-                proposals_list.append((proposals, self.anchors, attention_matrix, anchor_inds))
+                proposals_list.append((proposals, self.anchors_flat, anchor_inds))
         return proposals_list
 
     def loss(self, proposals_list, targets, cls_loss_weight=10):
@@ -244,7 +244,7 @@ class LaneATT(nn.Module):
         base_ys = self.anchor_ys.numpy()
         img = Image.open("/home/vincentmayer/repos/LaneATT/datasets/tusimple/clips/0531/1492626274615008344/2.jpg").resize((self.img_w, self.img_h))
         i = -1
-        for anchor in self.anchors_anchor_dim:
+        for anchor in self.anchors_flat:
             i += 1
             # if k is not None and i != k:
             #     continue
@@ -335,7 +335,7 @@ class LaneATT(nn.Module):
         device_self = super().to(*args, **kwargs)
         device_self.anchors = device_self.anchors.to(*args, **kwargs)
         device_self.anchor_ys = device_self.anchor_ys.to(*args, **kwargs)
-        device_self.anchors_anchor_dim = device_self.anchors_anchor_dim.to(*args, **kwargs)
+        device_self.anchors_flat = device_self.anchors_flat.to(*args, **kwargs)
         return device_self
 
 
