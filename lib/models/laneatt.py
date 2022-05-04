@@ -31,56 +31,49 @@ class LaneATT(nn.Module):
         self.img_w, self.img_h = img_w, img_h
         self.n_strips = S - 1
         self.n_offsets = S
-        self.fmap_h = img_h // self.stride
-        self.fmap_w = img_w // self.stride
+        self.fmap_h = int(math.ceil(img_h / self.stride))
+        self.fmap_w = int(math.ceil(img_w / self.stride))
         self.anchor_ys = torch.linspace(1, 0, steps=self.n_offsets, dtype=torch.float32)
         self.anchor_feat_channels = anchor_feat_channels
 
         # Anchor angles, same ones used in Line-CNN
         self.anchor_angles = [15., 22., 30., 39., 49., 60., 72, 80., 90., 100, 108., 120., 131., 141., 150., 158., 165.]
-        self.n_anchors_per_pos = len(self.anchor_angles) # 17
+        self.n_angles = len(self.anchor_angles) # 17
         self.n_anchor_pos_edges = self.fmap_w + 2*self.fmap_h
 
         # Generate anchors Anchor vec = [p(pos), p(neg), y_o, x_o, L, d1, ..., dS]
-        self.n_pred_per_anchor = 2 + 2 + 1 + self.n_offsets
-        # 1309x90x160
-        self.anchors = self.generate_anchors(self.anchor_angles, self.fmap_h, self.fmap_w) # (N_pred_per_anchor*N_angles)xHfxWf
+        self.n_anchor_properties = 2 + 2 + 1 + self.n_offsets
+
+        # n_angles, n_anchor_properties, height, width
+        self.anchors = self.generate_anchors(self.anchor_angles, self.fmap_h, self.fmap_w)
         
         # Now keep another anchor tensor that holds only the stacked anchors from the sides and bottom
-        # (A*(2+2+S+1))x(2*Hf+Wf) = 1309x340
-        self.edge_anchors = torch.cat([self.anchors[:, :, 0], self.anchors[:, :, -1], self.anchors[: , -1, :]], 1)
+        # n_angles, n_anchor_properties, 2*height + width
+        self.edge_anchors = torch.cat([self.anchors[:, :, :, 0], self.anchors[:, :, :, -1], self.anchors[:, :, -1, :]], -1)
 
-        # A*N_pred*Hf*Wf -> A*(2*Hf+Wf)xN_pred = 5780x77
-        self.anchors_anchor_dim = torch.zeros((self.n_anchors_per_pos*self.n_anchor_pos_edges, self.n_pred_per_anchor))
-        for pos_ix in range(self.n_anchor_pos_edges):
-            for a_ix in range(self.n_anchors_per_pos):
-                single_anchor = self.edge_anchors[a_ix*self.n_pred_per_anchor:(a_ix+1)*self.n_pred_per_anchor, pos_ix]
-                self.anchors_anchor_dim[pos_ix*self.n_anchors_per_pos + a_ix, :] = single_anchor
+        # n_angles * (2*height + width), n_anchor_properties
+        self.anchors_anchor_dim = self.edge_anchors.permute([0, 2, 1]).reshape([-1, self.n_anchor_properties])
 
         # Setup and initialize layers
-        conv_out_channels = 1024
-        self.conv = nn.Conv2d(in_channels=backbone_nb_channels, out_channels=conv_out_channels, kernel_size=1)
-        self.conv_cls = nn.Conv2d(in_channels=conv_out_channels, out_channels=2*self.n_anchors_per_pos, kernel_size=1)
-        self.conv_reg = nn.Conv2d(in_channels=conv_out_channels, out_channels=self.n_anchors_per_pos*(self.n_offsets+1), kernel_size=1)
+        self.conv = nn.Conv2d(in_channels=backbone_nb_channels, out_channels=self.anchor_feat_channels, kernel_size=1)
+        self.head_conv = nn.Conv2d(in_channels=self.anchor_feat_channels, out_channels=self.n_angles * (2 + 1 + self.n_offsets), kernel_size=1)
 
         self.initialize_layer(self.conv)
-        self.initialize_layer(self.conv_cls)
-        self.initialize_layer(self.conv_reg)
-
+        self.initialize_layer(self.head_conv)
 
     def generate_anchors(self, angles, fmap_h, fmap_w):
-        n_pred = self.n_pred_per_anchor * self.n_anchors_per_pos
-        anchors = torch.zeros((n_pred, fmap_h, fmap_w))
+        anchors = torch.zeros((self.n_angles, self.n_anchor_properties, fmap_h, fmap_w))  # n_angles, n_anchor_properties, height, width
 
-        left_anchors = self.generate_side_anchors(angles, x=0., n_origins=fmap_h)
-        right_anchors = self.generate_side_anchors(angles, x=1., n_origins=fmap_h)
-        bottom_anchors = self.generate_side_anchors(angles, y=1., n_origins=fmap_w)
+        left_anchors = self.generate_side_anchors(angles, x=0., n_origins=fmap_h)  # n_angles, n_anchor_properties, height
+        right_anchors = self.generate_side_anchors(angles, x=1., n_origins=fmap_h)  # n_angles, n_anchor_properties, height
+        bottom_anchors = self.generate_side_anchors(angles, y=1., n_origins=fmap_w)  # n_angles, n_anchor_properties, width
 
-        anchors[:,:,0] = left_anchors
-        anchors[:,:,-1] = right_anchors
-        anchors[:,-1,:] = bottom_anchors
+        anchors[:, :, :, 0] = left_anchors
+        anchors[:, :, :, -1] = right_anchors
+        anchors[:, :, -1, :] = bottom_anchors
 
-        return anchors
+        return anchors  # n_angles, n_anchor_properties, height, width
+
     def generate_side_anchors(self, angles, n_origins, x=None, y=None):
         if x is None and y is not None:
             origins = [(x, y) for x in np.linspace(1., 0., num=n_origins)]
@@ -90,20 +83,17 @@ class LaneATT(nn.Module):
             raise Exception('Please define exactly one of `x` or `y` (not neither nor both)')
 
         # each row, first for x and second for y:
-        # 2 scores, 1 start_y, start_x, 1 lenght, S coordinates, score[0] = negative prob, score[1] = positive prob
-        anchors = torch.zeros((self.n_pred_per_anchor * self.n_anchors_per_pos, n_origins))
-        for i, origin in enumerate(origins):
-            anchors_at_origin = torch.empty((0))
-            for angle in angles:
-                anchor_with_angle = self.generate_anchor(origin, angle)
-                anchors_at_origin = torch.cat([anchors_at_origin, anchor_with_angle], 0)
-            anchors[:, i] = anchors_at_origin
+        # 2 scores, 1 start_y, start_x, 1 length, S coordinates, score[0] = negative prob, score[1] = positive prob
+        anchors = torch.zeros((self.n_angles, self.n_anchor_properties, n_origins))
+        for j, origin in enumerate(origins):
+            for i, angle in enumerate(angles):
+                anchors[i, :, j] = self.generate_anchor(origin, angle)  # num_anchor_properties,
 
-        return anchors
+        return anchors  # n_angles, n_anchor_properties, n_origins
 
-    def generate_anchor(self, start, angle):
+    def generate_anchor(self, start, angle) -> torch.Tensor:
         anchor_ys = self.anchor_ys
-        anchor = torch.zeros(self.n_pred_per_anchor)
+        anchor = torch.zeros(self.n_anchor_properties)
         angle_rad = angle * math.pi / 180.  # degrees to radians
         start_x, start_y = start
         # anchor[:2] are the probabilities of positive/negative anchor
@@ -112,35 +102,38 @@ class LaneATT(nn.Module):
         # anchor[4] is the length
         # anchor[4] = angle
         anchor[5:] = (start_x + (1 - anchor_ys - 1 + start_y) / math.tan(angle_rad)) * self.img_w
-        return anchor
+        return anchor  # [num_anchor_properties, ]
 
     def forward(self, x, conf_threshold=None, nms_thres=0, nms_topk=6000):
-        resnet_features = self.feature_extractor(x) # BxCrxHfxWf
-        features = self.conv(resnet_features) # BxCfxHfxWf
+        resnet_features = self.feature_extractor(x)  # B, Cr, Hf, Wf
+        features = self.conv(resnet_features)  # B, Cf, Hf, Wf
+        lane_features = self.head_conv(features)  # B, A*(2 + 1 + S), Hf, Wf
 
-        cls_features = self.conv_cls(features) # Bx2*AxHfxWf
-        reg_features = self.conv_reg(features) # BxA*(S+1)xHfxWf
+        # Now select only the lane features from the left, right and bottom.
+        # B, num_angles * (2 + 1 + S), 2 * Hf + Wf
+        lane_proposals = torch.cat([lane_features[:, :, :, 0], lane_features[:, :, :, -1], lane_features[:, :, -1, :]], -1)
 
-        # fill the lane feature tensor. This is still the same shape as the feature map 
-        # BxA*(2+2+S+1)xHfxWf
-        batch_size = cls_features.shape[0]
-        lane_features = torch.zeros((batch_size, self.n_pred_per_anchor*self.n_anchors_per_pos, self.fmap_h, self.fmap_w), device=x.device)
-        lane_features += self.anchors # self.anchors.shape = A*(2+2+S+1)xHfxWf
-        for i in range(self.n_anchors_per_pos):
-            lane_features[:, i*self.n_pred_per_anchor:i*self.n_pred_per_anchor+2, :, :] = cls_features[:, i*2:(i+1)*2,: ,:]
-            lane_features[:, i*(self.n_pred_per_anchor)+4:(i+1)*(self.n_pred_per_anchor), :, :] += reg_features[:, i*(self.n_offsets+1):(i+1)*(self.n_offsets+1), :, :]
+        # B, 2 * Hf + Wf, num_angles * (2 + 1 + S)
+        lane_proposals = lane_proposals.permute([0, 2, 1])
 
-        # Now select only the lane features from the left, bottom and right. Bx(A*(2+2+S+1))x(2*Hf+Wf)
-        lane_proposals = torch.cat([lane_features[:, :, :, 0], lane_features[:, :, :, -1], lane_features[: ,: , -1, :]], 2)
+        batch_size = lane_proposals.shape[0]
+        # B, ((2 * Hf + Wf) * num_angles), (2 + 1 + S)
+        lane_proposals = torch.reshape(lane_proposals, [batch_size, (2 * self.fmap_h + self.fmap_w) * self.n_angles, -1])
 
-        # Bx(A*(2+2+S+1))x(2*Hf+Wf) -> BxA*(2*Hf+Wf)x(2+2+S+1)
-        lane_proposals_anch_dim = torch.zeros((lane_proposals.shape[0], self.n_anchors_per_pos*self.n_anchor_pos_edges, self.n_pred_per_anchor), device=x.device)
-        for pos_ix in range(self.n_anchor_pos_edges):
-            for a_ix in range(self.n_anchors_per_pos):
-                proposal = lane_proposals[:, a_ix*self.n_pred_per_anchor:(a_ix+1)*self.n_pred_per_anchor, pos_ix]
-                lane_proposals_anch_dim[:, pos_ix*self.n_anchors_per_pos + a_ix, :] = proposal
+        # 1, n_angles, (2 * Hf + Wf), n_anchor_properties
+        anchors_anchor_dim = torch.reshape(self.anchors_anchor_dim, (1, self.n_angles, (2 * self.fmap_h + self.fmap_w), -1))
 
-        lane_proposal_list = self.nms(lane_proposals_anch_dim, nms_thres, nms_topk, conf_threshold)
+        # 1, (2 * Hf + Wf), n_angles, n_anchor_properties
+        anchors_anchor_dim = anchors_anchor_dim.permute([0, 2, 1, 3])
+        # 1, (2 * Hf + Wf)*n_angles, n_anchor_properties
+        anchors_anchor_dim = torch.reshape(anchors_anchor_dim, [1, -1, self.n_anchor_properties])
+        # BS, (2 * Hf + Wf)*n_angles, n_anchor_properties
+        anchors_anchor_dim = torch.cat([anchors_anchor_dim] * batch_size, axis=0)
+
+        # BS, n_angles * (2*Hf + Wf), n_anchor_properties
+        lane_proposals = torch.cat([lane_proposals[..., :2], anchors_anchor_dim[..., 2:4], lane_proposals[..., 2:]], axis=-1)
+
+        lane_proposal_list = self.nms(lane_proposals, nms_thres, nms_topk, conf_threshold)
         return lane_proposal_list
 
     def nms(self, batch_proposals, nms_thres, nms_topk, conf_threshold):
