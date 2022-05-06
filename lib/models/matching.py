@@ -58,4 +58,4 @@ def match_proposals_with_targets(model: "LaneATT", proposals: torch.Tensor, targ
         target_positives_indices = distances[positives].argmin(dim=1)
     invalid_offsets_mask = invalid_offsets_mask[positives, target_positives_indices]
 
-    return positives, invalid_offsets_mask[:, :-1], negatives, target_positives_indices
+    return positives, invalid_offsets_mask, negatives, target_positives_indices

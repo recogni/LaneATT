@@ -57,7 +57,7 @@ class LaneATT(nn.Module):
 
         # Setup and initialize layers
         self.conv = nn.Conv2d(in_channels=backbone_nb_channels, out_channels=self.anchor_feat_channels, kernel_size=1)
-        self.head_conv = nn.Conv2d(in_channels=self.anchor_feat_channels, out_channels=self.n_angles * (self.n_anchor_properties - 2), kernel_size=1)
+        self.head_conv = nn.Conv2d(in_channels=self.anchor_feat_channels, out_channels=self.n_angles * (self.n_anchor_properties - 2), kernel_size=1, bias=False)
 
         self.initialize_layer(self.conv)
         self.initialize_layer(self.head_conv)
@@ -155,6 +155,7 @@ class LaneATT(nn.Module):
                         scores = scores[above_threshold]
                         anchor_inds = anchor_inds[above_threshold]
                     if proposals.shape[0] == 0:
+                        print("All proposals were removed.")
                         proposals_list.append((proposals[[]], self.anchors_flat[[]], None))
                         continue
                     keep, num_to_keep, _ = nms(proposals, scores, overlap=nms_thres, top_k=nms_topk)
@@ -194,12 +195,12 @@ class LaneATT(nn.Module):
             total_positives += num_positives
             negatives = proposals[negatives_mask]
             num_negatives = len(negatives)
-
+            print(f"num_positives: {num_positives}, num_negatives: {num_negatives}")
             # Handle edge case of no positives found
             if num_positives == 0:
-                cls_target = proposals.new_zeros(len(proposals)).long()
-                cls_pred = proposals[:, :2]
-                cls_loss += focal_loss(cls_pred, cls_target).sum()
+                cls_target = proposals.new_zeros(num_negatives).long()
+                cls_pred = proposals[negatives_mask, :2]
+                cls_loss += focal_loss(cls_pred, cls_target).sum() / num_negatives
                 continue
 
             # Get classification targets
@@ -207,6 +208,7 @@ class LaneATT(nn.Module):
             cls_target = proposals.new_zeros(num_positives + num_negatives).long()
             cls_target[:num_positives] = 1.
             cls_pred = all_proposals[:, :2]
+            cls_loss += focal_loss(cls_pred, cls_target).sum() / (num_positives + num_negatives)
 
             # Regression targets
             reg_pred = positives[:, 4:]
@@ -229,7 +231,6 @@ class LaneATT(nn.Module):
 
             # Loss calc
             reg_loss += smooth_l1_loss(reg_pred, reg_target)
-            cls_loss += focal_loss(cls_pred, cls_target).sum() / num_positives
 
         # Batch mean
         cls_loss /= valid_imgs
@@ -282,22 +283,25 @@ class LaneATT(nn.Module):
             lane_xs = lane[5:] / self.img_w
             start = int(round(lane[2].item() * self.n_strips))
             length = int(round(lane[4].item()))
-            end = start + length - 1
-            end = min(end, len(self.anchor_ys) - 1)
+            end = start - length
+            end = max(end, 0)
             # end = label_end
             # if the proposal does not start at the bottom of the image,
             # extend its proposal until the x is outside the image
-            mask = ~((((lane_xs[:start] >= 0.) &
-                       (lane_xs[:start] <= 1.)).cpu().numpy()[::-1].cumprod()[::-1]).astype(np.bool))
-            lane_xs[end + 1:] = -2
-            lane_xs[:start][mask] = -2
-            lane_ys = self.anchor_ys[lane_xs >= 0]
-            lane_xs = lane_xs[lane_xs >= 0]
-            lane_xs = lane_xs.flip(0).double()
-            lane_ys = lane_ys.flip(0)
-            if len(lane_xs) <= 1:
-                continue
-            points = torch.stack((lane_xs.reshape(-1, 1), lane_ys.reshape(-1, 1)), dim=1).squeeze(2)
+            # mask = ~((((lane_xs[:start] >= 0.) &
+            #            (lane_xs[:start] <= 1.)).cpu().numpy()[::-1].cumprod()[::-1]).astype(np.bool))
+            # lane_xs[end + 1:] = -2
+            # lane_xs[:start][mask] = -2
+            # lane_ys = self.anchor_ys[lane_xs >= 0]
+            # lane_xs = lane_xs[lane_xs >= 0]
+            # lane_xs = lane_xs.flip(0).double()
+            # lane_ys = lane_ys.flip(0)
+            # if len(lane_xs) <= 1:
+            #     continue
+            points = torch.stack((lane_xs[end:start].reshape(-1, 1), self.anchor_ys[end:start].reshape(-1, 1)), dim=1).squeeze(2)
+            print("Points are : ", points)
+            print('start_x', lane[3], 'start_y', lane[2], 'conf', lane[1])
+
             lane = Lane(points=points.cpu().numpy(),
                         metadata={
                             'start_x': lane[3],
@@ -315,6 +319,7 @@ class LaneATT(nn.Module):
             proposals[:, 4] = torch.round(proposals[:, 4])
             if proposals.shape[0] == 0:
                 decoded.append([])
+                print("Proposals were empty.")
                 continue
             if as_lanes:
                 pred = self.proposals_to_pred(proposals)
