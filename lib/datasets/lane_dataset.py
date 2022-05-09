@@ -120,7 +120,8 @@ class LaneDataset(Dataset):
             all_xs = np.hstack((xs_outside_image, xs_inside_image))
             lanes[lane_idx, 0] = 0
             lanes[lane_idx, 1] = 1
-            lanes[lane_idx, 2] = len(xs_outside_image) / self.n_strips
+            # TODO|NOTE changed y to be in normalized image coordinates
+            lanes[lane_idx, 2] = (1 - len(xs_outside_image) / self.n_strips)
             lanes[lane_idx, 3] = xs_inside_image[0]
             lanes[lane_idx, 4] = len(xs_inside_image)
             lanes[lane_idx, 5:5 + len(all_xs)] = all_xs

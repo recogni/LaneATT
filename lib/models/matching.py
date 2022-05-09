@@ -22,8 +22,7 @@ def match_proposals_with_targets(model: "LaneATT", proposals: torch.Tensor, targ
     targets = torch.cat(num_proposals * [targets])  # applying this 2 times on [c, d] gives [c, d, c, d]
 
     # get the min start point, which means find the valid start point in image coordinate system (y pointing downwards)
-    # TODO remove 1 - targets[:, 2] which is the start y coordinate, that should be done earlier.
-    targets_starts = (1 - targets[:, 2]) * model.n_strips  # n_prop * n_targets
+    targets_starts = targets[:, 2] * model.n_strips  # n_prop * n_targets
     proposals_starts = proposals[:, 2] * model.n_strips  # n_prop * n_targets
     starts = torch.min(targets_starts, proposals_starts).round().long()
 
