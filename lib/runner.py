@@ -1,7 +1,7 @@
 import pickle
 import random
 import logging
-
+from typing import List
 import cv2
 import torch
 import numpy as np
@@ -74,9 +74,12 @@ class Runner:
 
     def eval(self, epoch, on_val=False, save_predictions=False):
         model = self.cfg.get_model()
-        model_path = self.exp.get_checkpoint_path(epoch)
-        self.logger.info('Loading model %s', model_path)
-        model.load_state_dict(self.exp.get_epoch_model(epoch))
+
+        if epoch > 0:
+            model_path = self.exp.get_checkpoint_path(epoch)
+            self.logger.info('Loading model %s', model_path)
+            model.load_state_dict(self.exp.get_epoch_model(epoch))
+
         model = model.to(self.device)
         model.eval()
         if on_val:
