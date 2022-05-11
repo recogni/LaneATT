@@ -6,7 +6,7 @@ if TYPE_CHECKING:
 
 INFINITY = 987654.
 
-def match_proposals_with_targets(model: "LaneATT", proposals: torch.Tensor, targets: torch.Tensor, t_pos=0.05, t_neg=0.10):
+def match_proposals_with_targets(model: "LaneATT", proposals: torch.Tensor, targets: torch.Tensor, t_pos=0.03, t_neg=0.06):
 
     # Normalizing the x coordinates
     # TODO remove this from here, and normalize it earlier
