@@ -6,7 +6,7 @@ import cv2
 import torch
 import numpy as np
 from tqdm import tqdm, trange
-
+from lib.models.matching import match_proposals_with_targets
 
 class Runner:
     def __init__(self, cfg, exp, device, resume=False, view=None, deterministic=False):
@@ -48,7 +48,7 @@ class Runner:
                 labels = labels.to(self.device)
 
                 # Forward pass
-                outputs = model(images, **self.cfg.get_train_parameters())
+                outputs, output_map = model(images, **self.cfg.get_train_parameters())
                 loss, loss_dict_i = model.loss(outputs, labels, **loss_parameters)
 
                 # Backward and optimize
@@ -62,7 +62,30 @@ class Runner:
                 # Log
                 postfix_dict = {key: float(value) for key, value in loss_dict_i.items()}
                 postfix_dict['lr'] = optimizer.param_groups[0]["lr"]
-                self.exp.iter_end_callback(epoch, max_epochs, i, len(train_loader), loss.item(), postfix_dict)
+
+                scores = torch.nn.functional.softmax(output_map[:, :, :2, ...], dim=2)[:, :, 1:2, ...]
+                scores = torch.max(scores, dim=1)[0]
+                scores = (scores > 0.2)
+                scores = torch.cat([scores] * 3, dim=1)
+
+                l_cpu_np = labels.cpu().numpy()
+                l_cpu_np = l_cpu_np[0, l_cpu_np[0, :, 1] >= 1.0, :]  # num_lanes, properties
+                input_scores_map = np.zeros(scores[0].shape) # 3, H, W
+                x, y = (model.fmap_w - 1)*l_cpu_np[:, 3] / (model.img_w - 1), l_cpu_np[:, 2] * (model.fmap_h - 1)
+                input_scores_map[:, y.round().astype(np.int), x.round().astype(np.int)] = 1.0
+                input_scores_map = input_scores_map[np.newaxis, ...]
+
+                positives_mask, invalid_offsets_mask, negatives_mask, target_positives_indices, distances = match_proposals_with_targets(
+                    model, outputs[0][1], labels[0][labels[0][:, 1] == 1])
+                l_cpu_np = outputs[0][1][positives_mask].cpu().numpy()  # num_lanes, properties
+                matched_scores_map = np.zeros(scores[0].shape)  # 3, H, W
+                x, y = (model.fmap_w - 1) * l_cpu_np[:, 3] / (model.img_w - 1), l_cpu_np[:, 2] * (model.fmap_h - 1)
+                matched_scores_map[:, y.round().astype(np.int), x.round().astype(np.int)] = 1.0
+                matched_scores_map = matched_scores_map[np.newaxis, ...]
+
+                # create gt lines and anchor lines
+                self.exp.iter_end_callback(epoch, max_epochs, i, len(train_loader), loss.item(), postfix_dict,
+                                           model_inputs=images, score_outputs=scores, score_inputs=input_scores_map, matched_anchors=matched_scores_map)
                 postfix_dict['loss'] = loss.item()
                 pbar.set_postfix(ordered_dict=postfix_dict)
             self.exp.epoch_end_callback(epoch, max_epochs, model, optimizer, scheduler)
@@ -92,7 +115,7 @@ class Runner:
         with torch.no_grad():
             for idx, (images, _, _) in enumerate(tqdm(dataloader)):
                 images = images.to(self.device)
-                output = model(images, **test_parameters)
+                output, _ = model(images, **test_parameters)
                 prediction = model.decode(output, as_lanes=True)
                 predictions.extend(prediction)
                 if self.view:

@@ -99,16 +99,19 @@ class LaneATT(nn.Module):
         start_x, start_y = start
         # anchor[:2] are the probabilities of positive/negative anchor
         anchor[2] = start_y
-        anchor[3] = start_x
+        anchor[3] = start_x * (self.img_w - 1)
         # anchor[4] is the length
-        # anchor[4] = angle
-        anchor[5:] = (start_x + (anchor_ys - start_y) / math.tan(angle_rad)) * self.img_w
+        anchor[5:] = (start_x + (anchor_ys - start_y) / math.tan(angle_rad)) * (self.img_w - 1)
         return anchor  # [num_anchor_properties, ]
 
     def forward(self, x, conf_threshold=None, nms_thres=0, nms_topk=6000):
         resnet_features = self.feature_extractor(x)  # B, Cr, Hf, Wf
         features = self.conv(resnet_features)  # B, Cf, Hf, Wf
         lane_features = self.head_conv(features)  # B, A*(2 + 1 + S), Hf, Wf
+
+        sh = lane_features.shape
+        # B, A, (2 + 1 + S), Hf, Wf
+        lane_features_map = torch.reshape(lane_features, (sh[0], self.n_angles, self.n_anchor_properties - 2, sh[-2], sh[-1]))
 
         # Now select only the lane features from the left, right and bottom.
         # B, num_angles * (2 + 1 + S), 2 * Hf + Wf
@@ -137,7 +140,7 @@ class LaneATT(nn.Module):
                                     lane_proposals[..., 2:] + anchors_flat[..., 4:]], axis=-1)
 
         lane_proposal_list = self.nms(lane_proposals, nms_thres, nms_topk, conf_threshold)
-        return lane_proposal_list
+        return lane_proposal_list, lane_features_map
 
     def nms(self, batch_proposals, nms_thres, nms_topk, conf_threshold, is_training=False) -> List[List[torch.Tensor]]:
         softmax = nn.Softmax(dim=1)
@@ -170,13 +173,14 @@ class LaneATT(nn.Module):
             for proposals in batch_proposals:
                 anchors_flat = self.anchors_flat
                 if conf_threshold is not None:
-                    keep = proposals[:, 1] > conf_threshold
+                    scores = softmax(proposals[:, :2])[:, 1]
+                    keep = scores > conf_threshold
                     proposals = proposals[keep]
                     anchors_flat = anchors_flat[keep]
                 proposals_list.append((proposals, anchors_flat))
         return proposals_list
 
-    def loss(self, proposals_list, targets, cls_loss_weight=10.):
+    def loss(self, proposals_list, targets, cls_loss_weight=10., reg_loss_weight=0.0):
         focal_loss = FocalLoss(alpha=0.25, gamma=2.)
         smooth_l1_loss = nn.SmoothL1Loss()
         cls_loss = 0
@@ -216,6 +220,7 @@ class LaneATT(nn.Module):
             cls_target[:num_positives] = 1.
             cls_pred = all_proposals[:, :2]
             cls_loss += (focal_loss(cls_pred[:num_positives], cls_target[:num_positives]).sum() / num_positives) + \
+                        50. * \
                         (focal_loss(cls_pred[num_positives:], cls_target[num_positives:]).sum() / num_negatives)
 
             # Regression targets
@@ -255,8 +260,8 @@ class LaneATT(nn.Module):
         cls_loss /= valid_imgs
         reg_loss /= valid_imgs
 
-        loss = cls_loss_weight * cls_loss + reg_loss
-        return loss, {'cls_loss': cls_loss_weight * cls_loss, 'reg_loss': reg_loss, 'batch_positives': total_positives}
+        loss = cls_loss_weight * cls_loss + reg_loss_weight * reg_loss
+        return loss, {'cls_loss': cls_loss_weight * cls_loss, 'reg_loss': reg_loss_weight * reg_loss, 'batch_positives': total_positives}
 
     def draw_anchors(self, img_w, img_h, k=None):
         from IPython.display import clear_output

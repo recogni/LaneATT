@@ -99,13 +99,17 @@ class Experiment:
                 'scheduler': scheduler.state_dict()
             }, train_state_path)
 
-    def iter_end_callback(self, epoch, max_epochs, iter_nb, max_iter, loss, loss_components):
+    def iter_end_callback(self, epoch, max_epochs, iter_nb, max_iter, loss, loss_components, score_outputs=None, model_inputs=None, score_inputs=None, matched_anchors=None):
         line = 'Epoch [{}/{}] - Iter [{}/{}] - Loss: {:.5f} - '.format(epoch, max_epochs, iter_nb, max_iter, loss)
         line += ' - '.join(
             ['{}: {:.5f}'.format(component, loss_components[component]) for component in loss_components])
         self.logger.debug(line)
         overall_iter = (epoch * max_iter) + iter_nb
         self.tensorboard_writer.add_scalar('loss/total_loss', loss, overall_iter)
+        self.tensorboard_writer.add_image('images/input_image', model_inputs[0], overall_iter)
+        self.tensorboard_writer.add_image('images/output_scores', score_outputs[0], overall_iter)
+        self.tensorboard_writer.add_image('images/input_scores', score_inputs[0], overall_iter)
+        self.tensorboard_writer.add_image('images/matched_anchors', matched_anchors[0], overall_iter)
         for key in loss_components:
             self.tensorboard_writer.add_scalar('loss/{}'.format(key), loss_components[key], overall_iter)
 
