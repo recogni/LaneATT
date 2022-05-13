@@ -1,5 +1,5 @@
 # Model settings
-val_every: 10
+val_every: 50
 model_checkpoint_interval: 1
 seed: 0
 model:
@@ -45,13 +45,13 @@ datasets:
       normalize: false
       aug_chance: 1.0
       augmentations:
-        - name: Affine
-          parameters:
-            translate_px:
-              x: !!python/tuple [-25, 25]
-              y: !!python/tuple [-10, 10]
-            rotate: !!python/tuple [-6, 6]
-            scale: !!python/tuple [0.85, 1.15]
+#        - name: Affine
+#          parameters:
+#            translate_px:
+#              x: !!python/tuple [-25, 25]
+#              y: !!python/tuple [-10, 10]
+#            rotate: !!python/tuple [-6, 6]
+#            scale: !!python/tuple [0.85, 1.15]
         - name: HorizontalFlip
           parameters:
             p: 0.5
