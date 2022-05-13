@@ -65,7 +65,7 @@ class Runner:
 
                 scores = torch.nn.functional.softmax(output_map[:, :, :2, ...], dim=2)[:, :, 1:2, ...]
                 scores = torch.max(scores, dim=1)[0]
-                scores = (scores > 0.2)
+                # scores = (scores > 0.2)
                 scores = torch.cat([scores] * 3, dim=1)
 
                 l_cpu_np = labels.cpu().numpy()
