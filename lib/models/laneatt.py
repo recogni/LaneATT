@@ -40,7 +40,7 @@ class LaneATT(nn.Module):
         self.anchor_angles = [15., 22., 30., 39., 49., 60., 72., 80., 90., 100, 108., 120., 131., 141., 150., 158., 165.]
 
         self.n_angles = len(self.anchor_angles)  # 17
-        self.n_anchor_pos = self.fmap_w + 2 * self.fmap_h
+        self.n_anchor_pos = self.fmap_w + 2 * (self.fmap_h-1)
 
         # Generate anchors Anchor vec = [p(pos), p(neg), y_o, x_o, L, d1, ..., dS]
         self.n_anchor_properties = 2 + 2 + 1 + self.n_offsets
@@ -50,17 +50,27 @@ class LaneATT(nn.Module):
         
         # Now keep another anchor tensor that holds only the stacked anchors from the sides and bottom
         # n_angles, n_anchor_properties, 2*height + width
-        self.edge_anchors = torch.cat([self.anchors[:, :, :, 0], self.anchors[:, :, :, -1], self.anchors[:, :, -1, :]], -1)
+        self.edge_anchors = torch.cat([self.anchors[:, :, :-1, 0], self.anchors[:, :, :-1, -1], self.anchors[:, :, -1, :]], -1)
 
-        # n_angles * (2*height + width), n_anchor_properties
+        # n_angles * (2 * (height-1) + width), n_anchor_properties
         self.anchors_flat = self.edge_anchors.permute([0, 2, 1]).reshape([-1, self.n_anchor_properties])
 
         # Setup and initialize layers
-        self.conv = nn.Conv2d(in_channels=backbone_nb_channels, out_channels=self.anchor_feat_channels, kernel_size=1)
-        self.head_conv = nn.Conv2d(in_channels=self.anchor_feat_channels, out_channels=self.n_angles * (self.n_anchor_properties - 2), kernel_size=1, bias=False)
+        self.conv_bottom = nn.Conv2d(in_channels=backbone_nb_channels, out_channels=self.anchor_feat_channels, kernel_size=1)
+        self.head_conv_bottom = nn.Conv2d(in_channels=self.anchor_feat_channels, out_channels=self.n_angles * (self.n_anchor_properties - 2), kernel_size=1, bias=False)
 
-        self.initialize_layer(self.conv)
-        self.initialize_layer(self.head_conv)
+        self.conv_left = nn.Conv2d(in_channels=backbone_nb_channels, out_channels=self.anchor_feat_channels, kernel_size=1)
+        self.head_conv_left = nn.Conv2d(in_channels=self.anchor_feat_channels, out_channels=self.n_angles * (self.n_anchor_properties - 2), kernel_size=1, bias=False)
+
+        self.conv_right = nn.Conv2d(in_channels=backbone_nb_channels, out_channels=self.anchor_feat_channels, kernel_size=1)
+        self.head_conv_right = nn.Conv2d(in_channels=self.anchor_feat_channels, out_channels=self.n_angles * (self.n_anchor_properties - 2), kernel_size=1, bias=False)
+
+        self.initialize_layer(self.conv_bottom)
+        self.initialize_layer(self.head_conv_bottom)
+        self.initialize_layer(self.conv_left)
+        self.initialize_layer(self.head_conv_left)
+        self.initialize_layer(self.conv_right)
+        self.initialize_layer(self.head_conv_right)
 
     def generate_anchors(self, angles, fmap_h, fmap_w):
         anchors = torch.zeros((self.n_angles, self.n_anchor_properties, fmap_h, fmap_w))  # n_angles, n_anchor_properties, height, width
@@ -69,8 +79,8 @@ class LaneATT(nn.Module):
         right_anchors = self.generate_side_anchors(angles, x=1., n_origins=fmap_h)  # n_angles, n_anchor_properties, height
         bottom_anchors = self.generate_side_anchors(angles, y=1., n_origins=fmap_w)  # n_angles, n_anchor_properties, width
 
-        anchors[:, :, :, 0] = left_anchors
-        anchors[:, :, :, -1] = right_anchors
+        anchors[:, :, :-1, 0] = left_anchors[..., :-1]
+        anchors[:, :, :-1, -1] = right_anchors[..., :-1]
         anchors[:, :, -1, :] = bottom_anchors
 
         return anchors  # n_angles, n_anchor_properties, height, width
@@ -106,35 +116,45 @@ class LaneATT(nn.Module):
 
     def forward(self, x, conf_threshold=None, nms_thres=0, nms_topk=6000):
         resnet_features = self.feature_extractor(x)  # B, Cr, Hf, Wf
-        features = self.conv(resnet_features)  # B, Cf, Hf, Wf
-        lane_features = self.head_conv(features)  # B, A*(2 + 1 + S), Hf, Wf
+
+        features = self.conv_bottom(resnet_features)  # B, Cf, Hf, Wf
+        lane_features = self.head_conv_bottom(features)  # B, A*(2 + 1 + S), Hf, Wf
+
+        features_left = self.conv_left(resnet_features)  # B, Cf, Hf, Wf
+        lane_features_left = self.head_conv_left(features_left)  # B, A*(2 + 1 + S), Hf, Wf
+
+        features_right = self.conv_right(resnet_features)  # B, Cf, Hf, Wf
+        lane_features_right = self.head_conv_right(features_right)  # B, A*(2 + 1 + S), Hf, Wf
 
         sh = lane_features.shape
         # B, A, (2 + 1 + S), Hf, Wf
         lane_features_map = torch.reshape(lane_features, (sh[0], self.n_angles, self.n_anchor_properties - 2, sh[-2], sh[-1]))
+        lane_features_map_left = torch.reshape(lane_features_left, (sh[0], self.n_angles, self.n_anchor_properties - 2, sh[-2], sh[-1]))
+        lane_features_map_right = torch.reshape(lane_features_right, (sh[0], self.n_angles, self.n_anchor_properties - 2, sh[-2], sh[-1]))
+        lane_features_map[:, :, :, :-1, 0] = lane_features_map_left[:, :, :, :-1, 0]
+        lane_features_map[:, :, :, :-1, -1] = lane_features_map_right[:, :, :, :-1, -1]
 
         # Now select only the lane features from the left, right and bottom.
-        # B, num_angles * (2 + 1 + S), 2 * Hf + Wf
-        lane_proposals = torch.cat([lane_features[:, :, :, 0], lane_features[:, :, :, -1], lane_features[:, :, -1, :]], -1)
+        # B, num_angles * (2 + 1 + S), 2 * (Hf-1) + Wf
+        lane_proposals = torch.cat([lane_features_left[:, :, :-1, 0], lane_features_right[:, :, :-1, -1], lane_features[:, :, -1, :]], -1)
 
-        # B, 2 * Hf + Wf, num_angles * (2 + 1 + S)
+        # B, 2 * (Hf-1) + Wf, num_angles * (2 + 1 + S)
         lane_proposals = lane_proposals.permute([0, 2, 1])
 
         batch_size = lane_proposals.shape[0]
-        # B, ((2 * Hf + Wf) * num_angles), (2 + 1 + S)
-        lane_proposals = torch.reshape(lane_proposals, [batch_size, (2 * self.fmap_h + self.fmap_w) * self.n_angles, -1])
+        # B, 2 * (Hf-1) + Wf, num_angles, (2 + 1 + S)
+        lane_proposals = torch.reshape(lane_proposals, [batch_size, self.n_anchor_pos, self.n_angles, -1])
 
-        # 1, n_angles, (2 * Hf + Wf), n_anchor_properties
-        anchors_flat = torch.reshape(self.anchors_flat, (1, self.n_angles, (2 * self.fmap_h + self.fmap_w), -1))
+        # B, num_angles, 2 * (Hf-1) + Wf, (2 + 1 + S)
+        lane_proposals = lane_proposals.permute([0, 2, 1, 3])
 
-        # 1, (2 * Hf + Wf), n_angles, n_anchor_properties
-        anchors_flat = anchors_flat.permute([0, 2, 1, 3])
-        # 1, (2 * Hf + Wf)*n_angles, n_anchor_properties
-        anchors_flat = torch.reshape(anchors_flat, [1, -1, self.n_anchor_properties])
-        # BS, (2 * Hf + Wf)*n_angles, n_anchor_properties
-        anchors_flat = torch.cat([anchors_flat] * batch_size, axis=0)
+        # B, (num_angles*(2 * (Hf-1) + Wf)), (2 + 1 + S)
+        lane_proposals = torch.reshape(lane_proposals, [batch_size, self.n_angles * self.n_anchor_pos, -1])
 
-        # BS, n_angles * (2*Hf + Wf), n_anchor_properties
+        # BS, n_angles*(2 * (Hf-1) + Wf), n_anchor_properties
+        anchors_flat = torch.cat([self.anchors_flat[None, ...]] * batch_size, axis=0)
+
+        # BS, n_angles * (2*(Hf-1) + Wf), n_anchor_properties
         lane_proposals = torch.cat([lane_proposals[..., :2],
                                     anchors_flat[..., 2:4],
                                     lane_proposals[..., 2:] + anchors_flat[..., 4:]], axis=-1)
@@ -180,7 +200,7 @@ class LaneATT(nn.Module):
                 proposals_list.append((proposals, anchors_flat))
         return proposals_list
 
-    def loss(self, proposals_list, targets, cls_loss_weight=10., reg_loss_weight=0.0):
+    def loss(self, proposals_list, targets, cls_loss_weight=1.0, reg_loss_weight=1.0):
         focal_loss = FocalLoss(alpha=0.25, gamma=2.)
         smooth_l1_loss = nn.SmoothL1Loss()
         cls_loss = 0
@@ -220,7 +240,6 @@ class LaneATT(nn.Module):
             cls_target[:num_positives] = 1.
             cls_pred = all_proposals[:, :2]
             cls_loss += (focal_loss(cls_pred[:num_positives], cls_target[:num_positives]).sum() / num_positives) + \
-                        50. * \
                         (focal_loss(cls_pred[num_positives:], cls_target[num_positives:]).sum() / num_negatives)
 
             # Regression targets
