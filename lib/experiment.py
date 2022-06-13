@@ -99,17 +99,23 @@ class Experiment:
                 'scheduler': scheduler.state_dict()
             }, train_state_path)
 
-    def iter_end_callback(self, epoch, max_epochs, iter_nb, max_iter, loss, loss_components, score_outputs=None, model_inputs=None, score_inputs=None, matched_anchors=None):
+    def iter_end_callback(self, epoch, max_epochs, iter_nb, max_iter, loss, loss_components, score_outputs=None, score_outputs_th=None, model_inputs=None, score_inputs=None, matched_anchors=None,
+                          gt_lines=None, pred_lines=None, anchor_lines=None):
         line = 'Epoch [{}/{}] - Iter [{}/{}] - Loss: {:.5f} - '.format(epoch, max_epochs, iter_nb, max_iter, loss)
         line += ' - '.join(
             ['{}: {:.5f}'.format(component, loss_components[component]) for component in loss_components])
         self.logger.debug(line)
         overall_iter = (epoch * max_iter) + iter_nb
         self.tensorboard_writer.add_scalar('loss/total_loss', loss, overall_iter)
-        self.tensorboard_writer.add_image('images/input_image', model_inputs[0], overall_iter)
-        self.tensorboard_writer.add_image('images/output_scores', score_outputs[0], overall_iter)
-        self.tensorboard_writer.add_image('images/input_scores', score_inputs[0], overall_iter)
-        self.tensorboard_writer.add_image('images/matched_anchors', matched_anchors[0], overall_iter)
+        self.tensorboard_writer.add_image('train/input_image', model_inputs[0], overall_iter)
+        self.tensorboard_writer.add_image('train/output_scores', score_outputs[0], overall_iter)
+        self.tensorboard_writer.add_image('train/output_scores_th', score_outputs_th[0], overall_iter)
+        self.tensorboard_writer.add_image('train/input_scores', score_inputs[0], overall_iter)
+        self.tensorboard_writer.add_image('train/matched_anchors', matched_anchors[0], overall_iter)
+        self.tensorboard_writer.add_image('train/gt_lines', gt_lines[0], overall_iter)
+        self.tensorboard_writer.add_image('train/pred_lines', pred_lines[0], overall_iter)
+        self.tensorboard_writer.add_image('train/anchor_lines', anchor_lines[0], overall_iter)
+
         for key in loss_components:
             self.tensorboard_writer.add_scalar('loss/{}'.format(key), loss_components[key], overall_iter)
 

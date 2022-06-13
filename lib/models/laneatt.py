@@ -4,7 +4,7 @@ from PIL import Image
 import torch
 import numpy as np
 import torch.nn as nn
-from torchvision.models import resnet18, resnet34
+from torchvision.models import resnet18, resnet34, resnet101
 
 from nms import nms
 from lib.lane import Lane
@@ -194,13 +194,13 @@ class LaneATT(nn.Module):
                 anchors_flat = self.anchors_flat
                 if conf_threshold is not None:
                     scores = softmax(proposals[:, :2])[:, 1]
-                    keep = scores > conf_threshold
+                    keep = scores >= conf_threshold
                     proposals = proposals[keep]
                     anchors_flat = anchors_flat[keep]
                 proposals_list.append((proposals, anchors_flat))
         return proposals_list
 
-    def loss(self, proposals_list, targets, cls_loss_weight=1.0, reg_loss_weight=1.0):
+    def loss(self, proposals_list, targets, cls_loss_weight=10.0, reg_loss_weight=30.0):
         focal_loss = FocalLoss(alpha=0.25, gamma=2.)
         smooth_l1_loss = nn.SmoothL1Loss()
         cls_loss = 0
@@ -240,29 +240,27 @@ class LaneATT(nn.Module):
             cls_target[:num_positives] = 1.
             cls_pred = all_proposals[:, :2]
             cls_loss += (focal_loss(cls_pred[:num_positives], cls_target[:num_positives]).sum() / num_positives) + \
+                        10. * \
                         (focal_loss(cls_pred[num_positives:], cls_target[num_positives:]).sum() / num_negatives)
 
             # Regression targets
             reg_pred = positives[:, 4:]
+            reg_pred[:, 0] = reg_pred[:, 0] / self.n_offsets
             reg_pred[:, 1:] = reg_pred[:, 1:] / self.img_w
-
             with torch.no_grad():
                 target = target[target_positives_indices]
 
-                positive_starts = positives[:, 2] * self.n_strips
-                target_starts = target[:, 2] * self.n_strips
+                positive_starts = (positives[:, 2] * self.n_strips).round().long()
+                target_starts = (target[:, 2] * self.n_strips).round().long()
 
-                starts_min = torch.min(target_starts, positive_starts).round().long()
-                # reduce the length if the prediction start is higher than the target start
-                # so that we are computing the loss for the valid region.
-                target[:, 4] = target[:, 4] - (target_starts - starts_min)
+                target[:, 4] = target[:, 4] + (positive_starts - target_starts)
 
                 all_indices = torch.arange(num_positives, dtype=torch.long)
-                ends = (starts_min - (target[:, 4] - 1)).round().long()
+                ends = (positive_starts - (target[:, 4] - 1)).long()
 
                 valid_offsets_mask = torch.zeros((num_positives, self.n_offsets), dtype=torch.int16)  # S
+                valid_offsets_mask[all_indices, self.n_strips - positive_starts] = 1
                 valid_offsets_mask[all_indices, self.n_strips - ends] -= 1
-                valid_offsets_mask[all_indices, self.n_strips - starts_min] = 1
                 valid_offsets_mask = valid_offsets_mask.cumsum(dim=1) > 0
                 valid_offsets_mask[all_indices[target[:, 4] > 0], (self.n_strips - ends)[target[:, 4] > 0]] = True
 
@@ -270,6 +268,8 @@ class LaneATT(nn.Module):
                 invalid_offsets_mask = torch.cat((torch.zeros_like(invalid_offsets_mask[:, :1], dtype=torch.bool), invalid_offsets_mask), dim=1)
 
                 reg_target = target[:, 4:]
+                reg_target[:, 0] = reg_target[:, 0] / self.n_offsets
+                reg_target[:, 1:] = reg_target[:, 1:] / self.img_w
                 reg_target[invalid_offsets_mask] = reg_pred[invalid_offsets_mask]
 
             # Loss calc
@@ -393,6 +393,10 @@ def get_backbone(backbone, pretrained=False):
         backbone = resnet122_cifar()
         fmap_c = 64
         stride = 4
+    if backbone == 'resnet101':
+        backbone = torch.nn.Sequential(*list(resnet101(pretrained=pretrained).children())[:-2])
+        fmap_c = 2048
+        stride = 32
     elif backbone == 'resnet34':
         backbone = torch.nn.Sequential(*list(resnet34(pretrained=pretrained).children())[:-2])
         fmap_c = 512

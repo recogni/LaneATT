@@ -1,26 +1,26 @@
 # Model settings
-val_every: 50
+val_every: 100
 model_checkpoint_interval: 1
 seed: 0
 model:
   name: LaneATT
   parameters:
-    backbone: resnet34
+    backbone: resnet101
     S: &S 72
     topk_anchors: 1000
     anchors_freq_path: 'data/tusimple_anchors_freq.pt'
     img_h: &img_h 360
     img_w: &img_w 640
-    anchor_feat_channels: 1024
+    anchor_feat_channels: 2048
 batch_size: 8
-epochs: 100
+epochs: 200
 loss_parameters: {}
 train_parameters:
   conf_threshold:
   nms_thres: 15.
   nms_topk: 3000
 test_parameters:
-  conf_threshold: 0.2
+  conf_threshold: 0.8
   nms_thres: 45.
   nms_topk: &max_lanes 5
 optimizer:

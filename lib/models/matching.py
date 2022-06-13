@@ -6,8 +6,7 @@ if TYPE_CHECKING:
 
 INFINITY = 987654.
 
-def match_proposals_with_targets(model: "LaneATT", proposals: torch.Tensor, targets: torch.Tensor, t_pos=0.04, t_neg=0.08):
-
+def match_proposals_with_targets(model: "LaneATT", proposals: torch.Tensor, targets: torch.Tensor, t_pos=0.03, t_neg=0.06):
     # Normalizing the x coordinates
     # TODO remove this from here, and normalize it earlier
     targets = targets.clone()
@@ -34,10 +33,10 @@ def match_proposals_with_targets(model: "LaneATT", proposals: torch.Tensor, targ
     valid_offsets_mask = targets.new_zeros(targets.shape)  # n_prop * n_targets, 77=(5 + 72)
     all_indices = torch.arange(valid_offsets_mask.shape[0], dtype=torch.long, device=targets.device)  # 0, 1, 2, 3, 4, ... n_prop * n_targets - 1
 
-    #   put a -1 on index `start`, giving [0, 1, 0, -1, 0]
-    valid_offsets_mask[all_indices, 5 + (model.n_strips - ends)] -= 1.  # n_prop * n_targets
     #   put a 1 on index `end`, giving [0, 1, 0, 0, 0]
     valid_offsets_mask[all_indices, 5 + (model.n_strips - starts)] = 1.  # n_prop * n_targets
+    #   put a -1 on index `start`, giving [0, 1, 0, -1, 0]
+    valid_offsets_mask[all_indices, 5 + (model.n_strips - ends)] -= 1.  # n_prop * n_targets
 
     valid_offsets_mask = valid_offsets_mask.cumsum(dim=1) > 0
     valid_offsets_mask[all_indices[lengths > 0], 5 + (model.n_strips - ends)[lengths > 0]] = True
